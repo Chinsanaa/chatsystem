@@ -1,4 +1,4 @@
-# ICS Chat System — Final Project
+# ICDS Chat System — Final Project
 
 ## Team
 - Sanaa (GUI, Chatbot, Sentiment)
