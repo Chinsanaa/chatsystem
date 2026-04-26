@@ -19,8 +19,8 @@ ollama pull phi3
 ## Branch Rules
 - NEVER commit directly to main
 - Sanaa works on: sanaa branch
-- Teammate A works on: teammate-a branch
-- Teammate B works on: teammate-b branch
+- Bella works on: Bella branch
+- Zen works on: Zen branch
 - Sanaa merges everything into main before submission
 
 ## Files — Do Not Rename
@@ -30,9 +30,9 @@ client_state_machine.py, chat_group.py, indexer.py
 ## Files Per Person
 | File | Owner |
 |------|-------|
-| chat_gui.py | Sanaa + Teammate B |
+| chat_gui.py | Sanaa + Zen |
 | chat_bot_client.py | Sanaa |
 | sentiment.py | Sanaa |
-| snake.py | Teammate A |
-| scoreboard.py | Teammate A |
-| tictactoe.py | Teammate A (bonus) |
+| snake.py | Bella |
+| scoreboard.py | Bella |
+| tictactoe.py | Bella (bonus) |
