@@ -65,9 +65,9 @@ def myrecv(s):
     msg = ''
     while len(msg) < size:
         text = s.recv(size-len(msg)).decode()
-        if text == b'':
+        if not text:
             print('disconnected')
-            break
+            return('')
         msg += text
     #print ('received '+message)
     return (msg)
