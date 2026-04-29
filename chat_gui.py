@@ -1,6 +1,5 @@
 """
 chat_gui.py - Tkinter GUI for the ICS Chat System
-Wraps client_state_machine.py without modifying it.
 
 Author: Sanaa
 """
@@ -13,7 +12,6 @@ import json
 import argparse
 
 from chat_utils import *
-import client_state_machine as csm
 from chat_bot_client import ChatBotClient
 from sentiment import get_sentiment
 
@@ -44,10 +42,6 @@ TEXT_MAIN  = "#eaeaea"
 TEXT_DIM   = "#8892a4"
 ONLINE_DOT = "#4ecca3"
 
-# Protects sm.proc() from being called by two threads simultaneously
-_sm_lock = threading.Lock()
-
-
 # ==============================================================================
 # GUIClient
 # ==============================================================================
@@ -56,7 +50,6 @@ class GUIClient:
         self.args    = args
         self.name    = ""
         self.state   = S_OFFLINE
-        self.sm      = None
         self.socket  = None
 
         self.bot          = ChatBotClient(personality="friendly")
@@ -136,9 +129,6 @@ class GUIClient:
         if response["status"] == "ok":
             self.name  = name
             self.state = S_LOGGEDIN
-            self.sm    = csm.ClientSM(self.socket)
-            self.sm.set_state(S_LOGGEDIN)
-            self.sm.set_myname(self.name)
             self.login_frame.destroy()
             self.build_chat_screen()
             self.start_recv_thread()
@@ -201,6 +191,43 @@ class GUIClient:
             activebackground=ACCENT, activeforeground="white",
             padx=12, pady=4
         ).pack(side="right", padx=8, pady=5)
+
+        # Input area (packed early to guarantee visibility at the bottom)
+        input_frame = tk.Frame(self.root, bg="#1e2a40", pady=10)
+        input_frame.pack(fill="x", side="bottom")
+
+        tk.Label(
+            input_frame,
+            text="Type a message or command  (e.g. /chat alice | /who | /time | /bye | /p 18)",
+            bg="#1e2a40", fg=TEXT_DIM, font=("Courier New", 8)
+        ).pack(anchor="w", padx=16, pady=(0, 4))
+
+        input_row = tk.Frame(input_frame, bg="#1e2a40")
+        input_row.pack(fill="x", padx=12, pady=(0, 6))
+
+        # Use Entry for a clearly visible single-line composer across platforms.
+        self.input_var = tk.StringVar()
+        self.input_box = tk.Entry(
+            input_row,
+            textvariable=self.input_var,
+            bg="#ffffff",
+            fg="#111111",
+            insertbackground="#111111",
+            font=("Courier New", 13),
+            relief="solid",
+            bd=1
+        )
+        self.input_box.pack(side="left", fill="x", expand=True, ipady=7)
+        self.input_box.bind("<Return>", self._on_input_enter)
+        self.input_box.bind("<KP_Enter>", self._on_input_enter)
+
+        tk.Button(
+            input_row, text="SEND", command=self.send_message,
+            bg=ACCENT, fg="white", font=("Courier New", 11, "bold"),
+            relief="flat", cursor="hand2", bd=0,
+            activebackground=ACCENT2, activeforeground="white",
+            padx=24, pady=8
+        ).pack(side="left", padx=(10, 0))
 
         # Middle frame: bot_bar (hidden) stacked above chat_area
         self.middle_frame = tk.Frame(self.root, bg=BG_DARK)
@@ -266,41 +293,6 @@ class GUIClient:
         self.chat_area.tag_config("neutral",
             foreground=TEXT_DIM, font=("Courier New", 9))
 
-        # Input area at bottom
-        input_frame = tk.Frame(self.root, bg="#1e2a40", pady=10)
-        input_frame.pack(fill="x", side="bottom")
-
-        tk.Label(
-            input_frame,
-            text="Type a message or command  (e.g.  chat alice  |  who  |  time  |  bye)",
-            bg="#1e2a40", fg=TEXT_DIM, font=("Courier New", 8)
-        ).pack(anchor="w", padx=16, pady=(0, 4))
-
-        input_row = tk.Frame(input_frame, bg="#1e2a40")
-        input_row.pack(fill="x", padx=12, pady=(0, 6))
-
-        # tk.Text(height=1) is more reliable than tk.Entry on Windows
-        self.input_box = tk.Text(
-            input_row, height=1,
-            bg="#ffffff", fg="#111111",
-            insertbackground="#111111",
-            font=("Courier New", 13),
-            relief="flat", bd=0,
-            padx=10, pady=8,
-            wrap="none"
-        )
-        self.input_box.pack(side="left", fill="x", expand=True)
-        self.input_box.bind("<Return>",       lambda e: (self.send_message(), "break")[1])
-        self.input_box.bind("<Shift-Return>", lambda e: "break")
-
-        tk.Button(
-            input_row, text="SEND", command=self.send_message,
-            bg=ACCENT, fg="white", font=("Courier New", 11, "bold"),
-            relief="flat", cursor="hand2", bd=0,
-            activebackground=ACCENT2, activeforeground="white",
-            padx=24, pady=8
-        ).pack(side="left", padx=(10, 0))
-
         self._refocus_input()
         self.append_msg("system", f"Welcome, {self.name}! You are logged in.")
         self.append_msg("system", FRIENDLY_MENU)
@@ -317,16 +309,28 @@ class GUIClient:
     # ==========================================================================
     def send_message(self):
         """Called by Enter key or SEND button."""
-        text = self.input_box.get("1.0", "end-1c").strip()
+        text = self.input_var.get().strip()
         if not text:
             return
-        self.input_box.delete("1.0", "end")
+        self.input_var.set("")
         self._refocus_input()
         self._send_text(text)
 
+    def _on_input_enter(self, _event):
+        """Unified Enter handler for both main and numpad Enter keys."""
+        self.send_message()
+        return "break"
+
     def send_command(self, cmd):
         """Called by quick-command buttons (WHO, TIME, etc.)."""
-        self._send_text(cmd)
+        payload = self._parse_system_command(cmd)
+        try:
+            if payload:
+                mysend(self.socket, json.dumps(payload))
+            else:
+                self._send_text(cmd)
+        except Exception as e:
+            self.append_msg("error", f"[command error: {e}]")
         self._refocus_input()
 
     def _translate_command(self, text):
@@ -338,16 +342,53 @@ class GUIClient:
             return "c " + text.strip()[8:]
         return text
 
+    def _parse_system_command(self, text):
+        """
+        Parse command text into a server action payload.
+        Supports both slash and non-slash forms:
+          /time, /who, /chat bob, /? hello, /p 18, /bye
+          time, who, chat bob, ? hello, p 18, bye
+        Returns dict payload or None.
+        """
+        cmd = text.strip()
+        if not cmd:
+            return None
+        if cmd.startswith("/"):
+            cmd = cmd[1:].strip()
+        low = cmd.lower()
+
+        if low == "time":
+            return {"action": "time"}
+        if low == "who":
+            return {"action": "list"}
+        if low.startswith("chat "):
+            peer = cmd[5:].strip()
+            return {"action": "connect", "target": peer} if peer else None
+        if low.startswith("connect "):
+            peer = cmd[8:].strip()
+            return {"action": "connect", "target": peer} if peer else None
+        if low == "bye":
+            return {"action": "disconnect"}
+        if cmd.startswith("?"):
+            term = cmd[1:].strip()
+            return {"action": "search", "target": term} if term else None
+        if low.startswith("p "):
+            poem_idx = cmd[2:].strip()
+            if poem_idx.isdigit():
+                return {"action": "poem", "target": poem_idx}
+        return None
+
     def _send_text(self, text):
         """Core send logic — always runs on the main GUI thread."""
         if not text:
             return
-        if self.sm is None:
+        if self.socket is None:
             self.append_msg("error", "Not connected. Please log in first.")
             return
+        payload = self._parse_system_command(text)
 
-        # q -> clean shutdown
-        if text.strip().lower() == "q":
+        # q/quit -> clean shutdown
+        if text.strip().lower() in ("q", "/q", "quit", "/quit"):
             self._cleanup_and_quit()
             return
 
@@ -368,26 +409,54 @@ class GUIClient:
 
         # Show outgoing message bubble only while chatting
         if self.state == S_CHATTING:
+            if payload and payload.get("action") == "disconnect":
+                try:
+                    mysend(self.socket, json.dumps(payload))
+                    self.append_msg("system", "You left the chat.")
+                except Exception as e:
+                    self.append_msg("error", f"[send error: {e}]")
+                self.state = S_LOGGEDIN
+                self.append_msg("system", FRIENDLY_MENU)
+                return
+
+            # Allow system commands while chatting (slash or legacy style).
+            if payload and payload.get("action") != "connect":
+                try:
+                    mysend(self.socket, json.dumps(payload))
+                except Exception as e:
+                    self.append_msg("error", f"[command error: {e}]")
+                return
+
             self.append_msg("me", f"[{self.name}]: {text}")
             if self.sentiment_on:
                 stag, slabel = get_sentiment(text)
                 if slabel:
                     self.append_sentiment(stag, slabel)
+            try:
+                mysend(self.socket, json.dumps(
+                    {"action": "exchange", "from": f"[{self.name}]", "message": text}))
+            except Exception as e:
+                self.append_msg("error", f"[send error: {e}]")
+            return
 
-        # Hand off to state machine (lock: recv_loop also calls sm.proc)
-        cmd_text = self._translate_command(text)
-        with _sm_lock:
-            out = self.sm.proc(cmd_text, "")
-            self.state = self.sm.get_state()
+        # Logged-in command handling (non-chatting state)
+        cmd_text = self._translate_command(text).strip()
+        low = cmd_text.lower()
+        if not payload:
+            payload = self._parse_system_command(cmd_text)
 
-        if out:
-            if menu.strip() in out:
-                cleaned = out.replace(menu, "").strip()
-                if cleaned:
-                    self.append_msg("system", cleaned)
-                self.append_msg("system", FRIENDLY_MENU)
+        try:
+            if payload:
+                mysend(self.socket, json.dumps(payload))
+            elif low == "bye":
+                # Not in chat currently; keep behavior user-friendly.
+                self.append_msg("system", "You are not in a chat.")
             else:
-                self.append_msg("system", out)
+                self.append_msg("system",
+                    "You are not in a chat yet. Use  chat <username>  first.")
+                self.append_msg("system", FRIENDLY_MENU)
+        except Exception as e:
+            self.append_msg("error", f"[command error: {e}]")
 
     def disconnect_from_peer(self):
         """DISCONNECT button — only valid while in S_CHATTING."""
@@ -438,32 +507,51 @@ class GUIClient:
                     # Peer left the chat
                     msg = parsed.get("msg", "Your chat partner disconnected.")
                     self.append_msg("system", msg)
-                    with _sm_lock:
-                        self.sm.set_state(S_LOGGEDIN)
-                        self.sm.peer = ""
                     self.state = S_LOGGEDIN
                     self.append_msg("system", FRIENDLY_MENU)
 
-                elif action == "connect" and parsed.get("status") == "request":
-                    # Incoming connection request from another user
-                    with _sm_lock:
-                        out = self.sm.proc("", peer_msg)
-                        self.state = self.sm.get_state()
-                    if out:
-                        self.append_msg("system", out)
+                elif action == "connect":
+                    status = parsed.get("status", "")
+                    if status == "request":
+                        requester = parsed.get("from", "unknown")
+                        self.state = S_CHATTING
+                        self.append_msg("system", f"You are connected with {requester}")
+                        self.append_msg("system", f"Connect to {requester}. Chat away!")
+                        self.append_msg("system", "-----------------------------------")
+                    elif status == "success":
+                        self.state = S_CHATTING
+                        self.append_msg("system", "Connection successful. Chat away!")
+                        self.append_msg("system", "-----------------------------------")
+                    elif status == "busy":
+                        self.append_msg("system", "User is busy. Please try again later.")
+                    elif status == "self":
+                        self.append_msg("system", "Cannot talk to yourself.")
+                    else:
+                        self.append_msg("system", "User is not online, try again later.")
 
+                elif action == "time":
+                    self.append_msg("system", "Time is: " + parsed.get("results", ""))
+                elif action == "list":
+                    self.append_msg("system", "Here are all the users in the system:")
+                    self.append_msg("system", parsed.get("results", ""))
+                elif action == "poem":
+                    poem = parsed.get("results", "")
+                    self.append_msg("system", poem if poem else "Sonnet not found")
+                elif action == "search":
+                    results = (parsed.get("results", "") or "").strip()
+                    self.append_msg("system", results if results else "No matches found.")
+                elif action == "error":
+                    reason = parsed.get("reason", "unknown server error")
+                    self.append_msg("error", f"[server error: {reason}]")
                 else:
-                    # time, list, poem, search responses
-                    with _sm_lock:
-                        out = self.sm.proc("", peer_msg)
-                        self.state = self.sm.get_state()
-                    if out:
-                        self.append_msg("system", out)
+                    self.append_msg("error", f"[unknown server action: {action}]")
 
             except OSError:
                 break
-            except Exception as e:
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
                 self.append_msg("error", f"[recv error: {e}]")
+            except Exception:
+                self.append_msg("error", "[recv error: unexpected internal error]")
 
         self.append_msg("error", "Disconnected from server.")
 
@@ -549,7 +637,16 @@ class GUIClient:
     def _cleanup_and_quit(self):
         try:
             if self.socket:
+                if self.state == S_CHATTING:
+                    try:
+                        mysend(self.socket, json.dumps({"action": "disconnect"}))
+                    except Exception:
+                        pass
                 self.state = S_OFFLINE
+                try:
+                    self.socket.shutdown(socket.SHUT_RDWR)
+                except Exception:
+                    pass
                 self.socket.close()
         except Exception:
             pass
