@@ -10,12 +10,12 @@ CHAT_PORT = 1112
 SERVER = (CHAT_IP, CHAT_PORT)
 
 menu = "\n++++ Choose one of the following commands\n \
-        time: calendar time in the system\n \
-        who: to find out who else are there\n \
-        c _peer_: to connect to the _peer_ and chat\n \
-        ? _term_: to search your chat logs where _term_ appears\n \
-        p _#_: to get number <#> sonnet\n \
-        q: to leave the chat system\n\n"
+        /time: calendar time in the system\n \
+        /who: to find out who else are there\n \
+        /c _peer_: to connect to the _peer_ and chat\n \
+        /? _term_: to search your chat logs where _term_ appears\n \
+        /p _#_: to get number <#> sonnet\n \
+        /q: to leave the chat system\n\n"
 
 S_OFFLINE   = 0
 S_CONNECTED = 1

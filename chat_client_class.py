@@ -89,7 +89,7 @@ class Client:
 
     def run_chat(self):
         self.init_chat()
-        self.system_msg += 'Welcome to ICS chat\n'
+        self.system_msg += 'Welcome to ICDS chat\n'
         self.system_msg += 'Please enter your name: '
         self.output()
         while self.login() != True:
