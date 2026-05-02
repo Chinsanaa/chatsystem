@@ -163,18 +163,26 @@ class Server:
 # handle messeage exchange: IMPLEMENT THIS
 # ==============================================================================
             elif action == "exchange":
-                from_name = self.logged_sock2name[from_sock]
+                from_name = self.logged_sock2name[from_sock]  # real socket owner
                 message = msg.get("message")
                 if not isinstance(message, str):
                     self._send_error(from_sock, "missing exchange message")
                     return
+
+                # Optional sender label from client (used for bot messages).
+                # If absent/invalid, fall back to the real user.
+                display_from = msg.get("from", from_name)
+                if not isinstance(display_from, str) or not display_from.strip():
+                    display_from = from_name
+
                 """
                 Finding the list of people to send to and index message
                 """
                 # IMPLEMENTATION
                 # ---- start your code ---- #
                 # Store each chat line in sender's searchable index.
-                line = text_proc(message, from_name)
+                # Use display_from so bot replies render/search properly.
+                line = text_proc(message, display_from)
                 self.indices[from_name].add_msg_and_index(line)
 
                 # ---- end of your code --- #
@@ -186,7 +194,15 @@ class Server:
                     # IMPLEMENTATION
                     # ---- start your code ---- #
                     mysend(
-                        to_sock, json.dumps({"action": "exchange", "from": from_name, "message": message}))
+                        to_sock,
+                        json.dumps(
+                            {
+                                "action": "exchange",
+                                "from": display_from,
+                                "message": message
+                            }
+                        )
+                    )
 
                     # ---- end of your code --- #
 

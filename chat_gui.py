@@ -1,5 +1,5 @@
 """
-chat_gui.py - Tkinter GUI for the ICS Chat System
+chat_gui.py - Tkinter GUI for the ICDS Chat System
 
 Author: Sanaa
 """
@@ -20,13 +20,13 @@ from sentiment import get_sentiment
 # ==============================================================================
 FRIENDLY_MENU = """
 --- Available Commands ---
-  chat <username>    Connect to a user        (e.g.  chat alice)
-  who                See who is online
-  time               Show current date/time
-  bye                Leave current chat
-  ? <word>           Search chat history      (e.g.  ? hello)
-  p <number>         Get a Shakespeare sonnet (e.g.  p 18)
-  q                  Quit the app
+  /chat <username>    Connect to a user        (e.g.  chat alice)
+  /who                See who is online
+  /time               Show current date/time
+  /bye                Leave current chat
+  /? <word>           Search chat history      (e.g.  ? hello)
+  /p <number>         Get a Shakespeare sonnet (e.g.  p 18)
+  /q                  Quit the app
 --------------------------
 """
 
@@ -58,7 +58,7 @@ class GUIClient:
         self.sentiment_on = True
 
         self.root = tk.Tk()
-        self.root.title("ICS Chat")
+        self.root.title("ICDS Chat")
         self.root.geometry("780x640")
         self.root.configure(bg=BG_DARK)
         self.root.resizable(False, False)
@@ -74,7 +74,7 @@ class GUIClient:
         self.login_frame = tk.Frame(self.root, bg=BG_DARK)
         self.login_frame.place(relx=0.5, rely=0.5, anchor="center")
 
-        tk.Label(self.login_frame, text="ICS", bg=BG_DARK,
+        tk.Label(self.login_frame, text="ICDS", bg=BG_DARK,
                  fg=ACCENT, font=("Courier New", 48, "bold")).pack()
         tk.Label(self.login_frame, text="C H A T   S Y S T E M", bg=BG_DARK,
                  fg=TEXT_DIM, font=("Courier New", 12, "bold")).pack(pady=(0, 30))
@@ -141,7 +141,7 @@ class GUIClient:
     # CHAT SCREEN
     # ==========================================================================
     def build_chat_screen(self):
-        self.root.title(f"ICS Chat  -  {self.name}")
+        self.root.title(f"ICDS Chat  -  {self.name}")
 
         # Header bar
         header = tk.Frame(self.root, bg=BG_MID, height=54)
@@ -153,7 +153,7 @@ class GUIClient:
         tk.Label(header, text=f"Logged in as  {self.name}",
                  fg=TEXT_MAIN, bg=BG_MID,
                  font=("Courier New", 11, "bold")).pack(side="left", pady=14)
-        tk.Label(header, text="ICS CHAT", fg=ACCENT, bg=BG_MID,
+        tk.Label(header, text="ICDS CHAT", fg=ACCENT, bg=BG_MID,
                  font=("Courier New", 13, "bold")).pack(side="right", padx=20, pady=14)
 
         # Button bar
@@ -497,11 +497,17 @@ class GUIClient:
                     # Incoming chat message — display directly, no SM needed
                     sender  = parsed.get("from", "peer")
                     message = parsed.get("message", "")
-                    self.append_msg("peer", f"{sender}: {message}")
-                    if self.bot.should_respond(message):
-                        clean = self.bot.extract_message(message)
-                        threading.Thread(target=self._broadcast_bot_reply,
-                                         args=(clean, sender), daemon=True).start()
+
+                    if str(sender).strip() == "[Bot]":
+                        # Render bot lines in the bot style/stream.
+                        self.append_msg("bot", f"[Bot]: {message}")
+                    else:
+                        self.append_msg("peer", f"{sender}: {message}")
+                        # Only trigger bot when the user message contains the @bot mention.
+                        if self.bot.should_respond(message):
+                            clean = self.bot.extract_message(message)
+                            threading.Thread(target=self._broadcast_bot_reply,
+                                             args=(clean, sender), daemon=True).start()
 
                 elif action == "disconnect":
                     # Peer left the chat
@@ -613,10 +619,12 @@ class GUIClient:
         if self.state == S_CHATTING:
             self.root.after(0, lambda: self.append_msg("bot", f"[Bot]: {reply}"))
             try:
+                # Do NOT include "@bot" in the broadcast; otherwise receivers will
+                # trigger should_respond() again and create a ping-pong loop.
                 mysend(self.socket, json.dumps({
                     "action": "exchange",
                     "from": "[Bot]",
-                    "message": f"@bot replies: {reply}"
+                    "message": reply
                 }))
             except Exception:
                 pass
@@ -655,7 +663,7 @@ class GUIClient:
 
 # ==============================================================================
 def main():
-    parser = argparse.ArgumentParser(description="ICS Chat GUI Client")
+    parser = argparse.ArgumentParser(description="ICDS Chat GUI Client")
     parser.add_argument("-d", type=str, default=None, help="Server IP address")
     args = parser.parse_args()
     GUIClient(args)
