@@ -22,6 +22,7 @@ S_CONNECTED = 1
 S_LOGGEDIN  = 2
 S_CHATTING  = 3
 
+# Message size field length
 SIZE_SPEC = 5
 
 CHAT_WAIT = 0.2
