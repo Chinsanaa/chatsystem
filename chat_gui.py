@@ -5,7 +5,7 @@ Author: Sanaa
 """
 
 import tkinter as tk
-from tkinter import scrolledtext
+from tkinter import scrolledtext, messagebox
 import threading
 import socket
 import json
@@ -98,6 +98,16 @@ class GUIClient:
         self.name_entry.focus()
         self.name_entry.bind("<Return>", lambda e: self.attempt_login())
 
+        tk.Label(self.login_frame, text="PASSWORD", bg=BG_DARK,
+                 fg=TEXT_DIM, font=("Courier New", 9)).pack(anchor="w")
+        self.pw_entry = tk.Entry(
+            self.login_frame, width=28, bg=BG_INPUT, fg=TEXT_MAIN,
+            insertbackground=ACCENT, relief="flat", show='*',
+            font=("Courier New", 14), bd=8
+        )
+        self.pw_entry.pack(pady=(4, 8), ipady=6)
+        self.pw_entry.bind("<Return>", lambda e: self.attempt_login())
+
         self.login_status = tk.Label(self.login_frame, text="", bg=BG_DARK,
                                      fg=ACCENT, font=("Courier New", 9))
         self.login_status.pack(pady=(0, 10))
@@ -109,9 +119,171 @@ class GUIClient:
             activebackground=ACCENT2, activeforeground="white",
             padx=30, pady=10
         ).pack()
+        # Sign up / Forgot password row
+        row = tk.Frame(self.login_frame, bg=BG_DARK)
+        row.pack(pady=(10,0))
+        tk.Button(row, text="SIGN UP", command=self.build_signup_window,
+                  bg=BG_DARK, fg=TEXT_MAIN, font=("Courier New", 9), relief="flat",
+                  cursor="hand2", bd=0).pack(side="left", padx=8)
+        tk.Button(row, text="FORGOT PW", command=self.build_forgot_window,
+                  bg=BG_DARK, fg=TEXT_DIM, font=("Courier New", 9), relief="flat",
+                  cursor="hand2", bd=0).pack(side="left", padx=8)
+
+    # ---------------------- server helper & dialogs ----------------------
+    def _server_request(self, payload):
+        """Send a one-off request to the server (used for signup/forgot before login)."""
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            svr = SERVER if self.args.d is None else (self.args.d, CHAT_PORT)
+            s.settimeout(3.0)
+            try:
+                s.connect(svr)
+            except Exception as primary_err:
+                # If connecting to the hostname address fails, try localhost as a fallback
+                if self.args.d is None and SERVER[0] != '127.0.0.1':
+                    try:
+                        s.connect(('127.0.0.1', CHAT_PORT))
+                    except Exception as e2:
+                        raise primary_err
+                else:
+                    raise
+            mysend(s, json.dumps(payload))
+            # receive framed response
+            resp_txt = myrecv(s)
+            resp = json.loads(resp_txt) if resp_txt else None
+            try:
+                s.close()
+            except Exception:
+                pass
+            return resp
+        except Exception as e:
+            try:
+                s.close()
+            except Exception:
+                pass
+            return {"error": str(e)}
+
+    def build_signup_window(self):
+        win = tk.Toplevel(self.root)
+        win.title("Sign Up")
+        win.configure(bg=BG_DARK)
+        win.resizable(False, False)
+
+        tk.Label(win, text="Create an account", bg=BG_DARK, fg=ACCENT,
+                 font=("Courier New", 14, "bold")).pack(padx=12, pady=(12,6))
+
+        tk.Label(win, text="Username", bg=BG_DARK, fg=TEXT_DIM).pack(anchor="w", padx=12)
+        name_e = tk.Entry(win, bg=BG_INPUT, fg=TEXT_MAIN)
+        name_e.pack(padx=12, pady=(2,8))
+
+        tk.Label(win, text="Email", bg=BG_DARK, fg=TEXT_DIM).pack(anchor="w", padx=12)
+        email_e = tk.Entry(win, bg=BG_INPUT, fg=TEXT_MAIN)
+        email_e.pack(padx=12, pady=(2,8))
+
+        tk.Label(win, text="Password", bg=BG_DARK, fg=TEXT_DIM).pack(anchor="w", padx=12)
+        pw_e = tk.Entry(win, bg=BG_INPUT, fg=TEXT_MAIN, show='*')
+        pw_e.pack(padx=12, pady=(2,8))
+
+        tk.Label(win, text="Confirm Password", bg=BG_DARK, fg=TEXT_DIM).pack(anchor="w", padx=12)
+        pw2_e = tk.Entry(win, bg=BG_INPUT, fg=TEXT_MAIN, show='*')
+        pw2_e.pack(padx=12, pady=(2,8))
+
+        status = tk.Label(win, text="", bg=BG_DARK, fg=ACCENT)
+        status.pack(pady=(4,8))
+
+        def _submit():
+            uname = name_e.get().strip()
+            email = email_e.get().strip()
+            p1 = pw_e.get()
+            p2 = pw2_e.get()
+            if not uname or not email or not p1:
+                status.config(text="Please fill all fields.")
+                return
+            if p1 != p2:
+                status.config(text="Passwords do not match.")
+                return
+            resp = self._server_request({"action": "signup", "name": uname, "email": email, "password": p1})
+            if not resp:
+                status.config(text="Server unreachable.")
+                return
+            if isinstance(resp, dict) and resp.get("error"):
+                status.config(text=f"Error: {resp.get('error')}")
+                return
+            st = resp.get("status")
+            if st == "ok":
+                status.config(text="Account created. You can now log in.")
+                self.root.after(1500, win.destroy)
+            elif st == "exists":
+                status.config(text="Username already exists.")
+            else:
+                status.config(text="Signup failed.")
+
+        tk.Button(win, text="Create", command=_submit, bg=ACCENT, fg="white").pack(pady=(0,12))
+
+    def build_forgot_window(self):
+        win = tk.Toplevel(self.root)
+        win.title("Forgot Password")
+        win.configure(bg=BG_DARK)
+        win.resizable(False, False)
+
+        tk.Label(win, text="Recover password", bg=BG_DARK, fg=ACCENT,
+                 font=("Courier New", 14, "bold")).pack(padx=12, pady=(12,6))
+
+        tk.Label(win, text="Username", bg=BG_DARK, fg=TEXT_DIM).pack(anchor="w", padx=12)
+        name_e = tk.Entry(win, bg=BG_INPUT, fg=TEXT_MAIN)
+        name_e.pack(padx=12, pady=(2,8))
+
+        tk.Label(win, text="Email", bg=BG_DARK, fg=TEXT_DIM).pack(anchor="w", padx=12)
+        email_e = tk.Entry(win, bg=BG_INPUT, fg=TEXT_MAIN)
+        email_e.pack(padx=12, pady=(2,8))
+
+        status = tk.Label(win, text="", bg=BG_DARK, fg=ACCENT)
+        status.pack(pady=(4,8))
+
+        def _submit():
+            uname = name_e.get().strip()
+            email = email_e.get().strip()
+            if not uname or not email:
+                status.config(text="Please fill both fields.")
+                return
+            resp = self._server_request({"action": "forgot", "name": uname, "email": email})
+            if not resp:
+                status.config(text="Server unreachable.")
+                return
+            if isinstance(resp, dict) and resp.get("error"):
+                status.config(text=f"Error: {resp.get('error')}")
+                return
+            st = resp.get("status")
+            if st == "ok":
+                temp = resp.get("temp", "")
+                status.config(text=f"Temporary password: {temp}")
+            elif st == "no-match":
+                status.config(text="No matching account found.")
+            else:
+                status.config(text="Request failed.")
+
+        tk.Button(win, text="Recover", command=_submit, bg=ACCENT, fg="white").pack(pady=(0,12))
+
+    def _open_emoji_picker(self):
+        emojis = ["😊","😂","😢","👍","❤️","🔥","🎉","😮","😡","🤖"]
+        win = tk.Toplevel(self.root)
+        win.title("Emoji")
+        win.configure(bg=BG_DARK)
+        win.resizable(False, False)
+        frm = tk.Frame(win, bg=BG_DARK)
+        frm.pack(padx=8, pady=8)
+        for e in emojis:
+            def _ins(ch=e):
+                try:
+                    self.input_box.insert('insert', ch)
+                except Exception:
+                    pass
+                win.destroy()
+            tk.Button(frm, text=e, command=_ins, width=3, bg=BG_INPUT, fg=TEXT_MAIN).pack(side='left', padx=4)
 
     def attempt_login(self):
         name = self.name_entry.get().strip()
+        password = self.pw_entry.get() or ""
         if not name:
             self.login_status.config(text="Please enter a username.")
             return
@@ -127,21 +299,27 @@ class GUIClient:
             self.login_status.config(text="Cannot reach server. Is it running?")
             return
 
-        mysend(self.socket, json.dumps({"action": "login", "name": name}))
+        mysend(self.socket, json.dumps({"action": "login", "name": name, "password": password}))
         try:
             response = json.loads(myrecv(self.socket))
         except Exception:
             self.login_status.config(text="Server error during login.")
             return
 
-        if response["status"] == "ok":
+        if response.get("status") == "ok":
             self.name  = name
             self.state = S_LOGGEDIN
             self.login_frame.destroy()
             self.build_chat_screen()
             self.start_recv_thread()
-        elif response["status"] == "duplicate":
+        elif response.get("status") == "no-account":
+            # Prompt user to sign up
+            self.login_status.config(text="Account not found. Please sign up.")
+            self.build_signup_window()
+        elif response.get("status") == "duplicate":
             self.login_status.config(text="Username taken. Try another.")
+        elif response.get("status") == "bad-password":
+            self.login_status.config(text="Incorrect password.")
         else:
             self.login_status.config(text="Login failed.")
 
@@ -241,6 +419,13 @@ class GUIClient:
             activebackground=ACCENT2, activeforeground="white",
             padx=24, pady=8
         ).pack(side="left", padx=(10, 0))
+
+        # Emoji picker button
+        tk.Button(
+            input_row, text="😊", command=self._open_emoji_picker,
+            bg=BG_INPUT, fg="white", font=("Courier New", 12),
+            relief="flat", cursor="hand2", bd=0, padx=8
+        ).pack(side="left", padx=(6, 0))
 
         # Middle frame: bot_bar (hidden) stacked above chat_area
         self.middle_frame = tk.Frame(self.root, bg=BG_DARK)
@@ -571,11 +756,17 @@ class GUIClient:
                     # Incoming chat message — display directly, no SM needed
                     sender  = parsed.get("from", "peer")
                     message = parsed.get("message", "")
-                    self.append_msg("peer", f"{sender}: {message}")
-                    if self.bot.should_respond(message):
-                        clean = self.bot.extract_message(message)
-                        threading.Thread(target=self._broadcast_bot_reply,
-                                         args=(clean, sender), daemon=True).start()
+
+                    if str(sender).strip() == "[Bot]":
+                        # Render bot lines in the bot style/stream.
+                        self.append_msg("bot", f"[Bot]: {message}")
+                    else:
+                        self.append_msg("peer", f"{sender}: {message}")
+                        # Only trigger bot when the user message contains the @bot mention.
+                        if self.bot.should_respond(message):
+                            clean = self.bot.extract_message(message)
+                            threading.Thread(target=self._broadcast_bot_reply,
+                                             args=(clean, sender), daemon=True).start()
 
                 elif action == "disconnect":
                     # Peer left the chat
@@ -588,10 +779,26 @@ class GUIClient:
                     status = parsed.get("status", "")
                     if status == "request":
                         requester = parsed.get("from", "unknown")
-                        self.state = S_CHATTING
-                        self.append_msg("system", f"You are connected with {requester}")
-                        self.append_msg("system", f"Connect to {requester}. Chat away!")
-                        self.append_msg("system", "-----------------------------------")
+
+                        def _prompt_request():
+                            # Ask the local user whether to accept the incoming chat
+                            accept = messagebox.askyesno("Chat request",
+                                f"{requester} wants to chat with you. Accept?")
+                            if accept:
+                                self.state = S_CHATTING
+                                self.append_msg("system", f"You are connected with {requester}")
+                                self.append_msg("system", f"Connect to {requester}. Chat away!")
+                                self.append_msg("system", "-----------------------------------")
+                            else:
+                                # Tell server we decline (best-effort)
+                                try:
+                                    mysend(self.socket, json.dumps({"action": "disconnect"}))
+                                except Exception:
+                                    pass
+                                self.append_msg("system", f"You declined chat with {requester}")
+
+                        # Schedule the prompt on the GUI thread
+                        self.root.after(0, _prompt_request)
                     elif status == "success":
                         self.state = S_CHATTING
                         self.append_msg("system", "Connection successful. Chat away!")

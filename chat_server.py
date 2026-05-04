@@ -14,6 +14,28 @@ import scoreboard as sb
 from uuid import uuid4
 from chat_utils import *
 import chat_group as grp
+import os
+import hashlib
+
+
+# Simple user database (JSON) helpers
+USERS_FILE = 'users.json'
+
+def _load_users():
+    if not os.path.exists(USERS_FILE):
+        return {}
+    try:
+        with open(USERS_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def _save_users(users):
+    with open(USERS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(users, f, indent=2)
+
+def _hash_password(pw: str) -> str:
+    return hashlib.sha256(pw.encode('utf-8')).hexdigest()
 
 
 class Server:
@@ -74,8 +96,55 @@ class Server:
             msg = json.loads(myrecv(sock))
             if len(msg) > 0:
 
+                action = msg.get("action")
+                # Allow signup/forgot during initial handshake (before login)
+                if action == "signup":
+                    name = msg.get("name", "").strip()
+                    email = msg.get("email", "").strip()
+                    password = msg.get("password", "")
+                    if not name or not email or not password:
+                        mysend(sock, json.dumps({"action": "signup", "status": "missing-fields"}))
+                        return
+                    users = _load_users()
+                    if name in users:
+                        mysend(sock, json.dumps({"action": "signup", "status": "exists"}))
+                        return
+                    users[name] = {"email": email, "pw_hash": _hash_password(password)}
+                    _save_users(users)
+                    mysend(sock, json.dumps({"action": "signup", "status": "ok"}))
+                    return
+                if action == "forgot":
+                    name = msg.get("name", "").strip()
+                    email = msg.get("email", "").strip()
+                    if not name or not email:
+                        mysend(sock, json.dumps({"action": "forgot", "status": "missing-fields"}))
+                        return
+                    users = _load_users()
+                    if name not in users or users[name].get("email") != email:
+                        mysend(sock, json.dumps({"action": "forgot", "status": "no-match"}))
+                        return
+                    import random, string
+                    temp = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
+                    users[name]["pw_hash"] = _hash_password(temp)
+                    _save_users(users)
+                    mysend(sock, json.dumps({"action": "forgot", "status": "ok", "temp": temp}))
+                    return
+
                 if msg["action"] == "login":
-                    name = msg["name"]
+                    # require name and password; only allow existing accounts
+                    name = msg.get("name", "").strip()
+                    password = msg.get("password", "")
+                    users = _load_users()
+                    # require an existing account
+                    if name not in users:
+                        mysend(sock, json.dumps({"action": "login", "status": "no-account"}))
+                        return
+                    # check password match
+                    stored = users[name]
+                    if _hash_password(password) != stored.get("pw_hash"):
+                        mysend(sock, json.dumps({"action": "login", "status": "bad-password"}))
+                        return
+                    # continue with original duplicate/login logic
                     if self.group.is_member(name) != True:
                         # move socket from new clients list to logged clients
                         self.new_clients.remove(sock)
@@ -116,51 +185,6 @@ class Server:
             del self.logged_sock2name[sock]
             self.group.leave(name)
 
-            # -------------------------------------------------------------
-            # Cleanup tic-tac-toe state on disconnect
-            # -------------------------------------------------------------
-            # Pending challenge where this user is the target
-            if name in self.ttt_pending_challenges:
-                del self.ttt_pending_challenges[name]
-
-            # Pending challenge where this user is the inviter
-            to_delete = []
-            for target_name, pending in self.ttt_pending_challenges.items():
-                if pending.get("from") == name:
-                    to_delete.append(target_name)
-            for target_name in to_delete:
-                del self.ttt_pending_challenges[target_name]
-
-            # Active game involving this player
-            if name in self.ttt_player_to_game_id:
-                game_id = self.ttt_player_to_game_id.get(name)
-                game_state = self.ttt_games.get(game_id)
-                if game_state:
-                    players = game_state.get("players", {})
-                    other_name = None
-                    if players.get("X") == name:
-                        other_name = players.get("O")
-                    elif players.get("O") == name:
-                        other_name = players.get("X")
-
-                    other_sock = self.logged_name2sock.get(other_name) if other_name else None
-                    if other_sock:
-                        try:
-                            mysend(other_sock, json.dumps({
-                                "action": "ttt_abort",
-                                "game_id": game_id,
-                                "reason": "opponent_left"
-                            }))
-                        except Exception:
-                            pass
-
-                    # cleanup mappings + game
-                    for nm in [players.get("X"), players.get("O")]:
-                        if nm in self.ttt_player_to_game_id and self.ttt_player_to_game_id.get(nm) == game_id:
-                            del self.ttt_player_to_game_id[nm]
-                    if game_id in self.ttt_games:
-                        del self.ttt_games[game_id]
-
         if sock in self.new_clients:
             self.new_clients.remove(sock)
         if sock in self.all_sockets:
@@ -199,40 +223,80 @@ class Server:
                 from_name = self.logged_sock2name[from_sock]
                 if to_name == from_name:
                     msg = json.dumps({"action": "connect", "status": "self"})
-                # connect to the peer
-                elif self.group.is_member(to_name):
+                # connect to the peer: check actual logged-in users first
+                elif to_name in self.logged_name2sock:
+                    # if the peer is already talking, mark busy
                     if self.group.members.get(to_name) == grp.S_TALKING:
-                        msg = json.dumps(
-                            {"action": "connect", "status": "busy"})
+                        msg = json.dumps({"action": "connect", "status": "busy"})
                     else:
+                        # create or join group
                         self.group.connect(from_name, to_name)
                         the_guys = self.group.list_me(from_name)
-                        msg = json.dumps(
-                            {"action": "connect", "status": "success"})
+                        msg = json.dumps({"action": "connect", "status": "success"})
+                        # notify other members (the_guys[1:]) with a request
                         for g in the_guys[1:]:
-                            to_sock = self.logged_name2sock[g]
-                            mysend(to_sock, json.dumps(
-                                {"action": "connect", "status": "request", "from": from_name}))
+                            to_sock = self.logged_name2sock.get(g)
+                            if to_sock:
+                                mysend(to_sock, json.dumps({"action": "connect", "status": "request", "from": from_name}))
                 else:
-                    msg = json.dumps(
-                        {"action": "connect", "status": "no-user"})
+                    msg = json.dumps({"action": "connect", "status": "no-user"})
                 mysend(from_sock, msg)
+            elif action == "signup":
+                # signup expects name, email, password
+                name = msg.get("name", "").strip()
+                email = msg.get("email", "").strip()
+                password = msg.get("password", "")
+                if not name or not email or not password:
+                    mysend(from_sock, json.dumps({"action": "signup", "status": "missing-fields"}))
+                    return
+                users = _load_users()
+                if name in users:
+                    mysend(from_sock, json.dumps({"action": "signup", "status": "exists"}))
+                    return
+                users[name] = {"email": email, "pw_hash": _hash_password(password)}
+                _save_users(users)
+                mysend(from_sock, json.dumps({"action": "signup", "status": "ok"}))
+            elif action == "forgot":
+                # forgot expects name and email, returns temp password
+                name = msg.get("name", "").strip()
+                email = msg.get("email", "").strip()
+                if not name or not email:
+                    mysend(from_sock, json.dumps({"action": "forgot", "status": "missing-fields"}))
+                    return
+                users = _load_users()
+                if name not in users or users[name].get("email") != email:
+                    mysend(from_sock, json.dumps({"action": "forgot", "status": "no-match"}))
+                    return
+                # generate a temporary password (insecure but OK for demo)
+                import random, string
+                temp = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
+                users[name]["pw_hash"] = _hash_password(temp)
+                _save_users(users)
+                mysend(from_sock, json.dumps({"action": "forgot", "status": "ok", "temp": temp}))
 # ==============================================================================
 # handle messeage exchange: IMPLEMENT THIS
 # ==============================================================================
             elif action == "exchange":
-                from_name = self.logged_sock2name[from_sock]
+                from_name = self.logged_sock2name[from_sock]  # real socket owner
                 message = msg.get("message")
                 if not isinstance(message, str):
                     self._send_error(from_sock, "missing exchange message")
                     return
+
+                # Optional sender label from client (used for bot messages).
+                # If absent/invalid, fall back to the real user.
+                display_from = msg.get("from", from_name)
+                if not isinstance(display_from, str) or not display_from.strip():
+                    display_from = from_name
+
                 """
                 Finding the list of people to send to and index message
                 """
                 # IMPLEMENTATION
                 # ---- start your code ---- #
                 # Store each chat line in sender's searchable index.
-                line = text_proc(message, from_name)
+                # Use display_from so bot replies render/search properly.
+                line = text_proc(message, display_from)
                 self.indices[from_name].add_msg_and_index(line)
 
                 # ---- end of your code --- #
@@ -244,7 +308,15 @@ class Server:
                     # IMPLEMENTATION
                     # ---- start your code ---- #
                     mysend(
-                        to_sock, json.dumps({"action": "exchange", "from": from_name, "message": message}))
+                        to_sock,
+                        json.dumps(
+                            {
+                                "action": "exchange",
+                                "from": display_from,
+                                "message": message
+                            }
+                        )
+                    )
 
                     # ---- end of your code --- #
 
