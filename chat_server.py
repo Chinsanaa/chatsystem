@@ -344,6 +344,7 @@ class Server:
                 msg = json.loads(msg)
             except json.JSONDecodeError:
                 self._send_error(from_sock, "invalid json")
+                logger.debug(f"Invalid JSON from socket {getattr(from_sock, 'fileno', lambda: 'n/a')()}: {msg}")
                 return
 
             action = msg.get("action")
@@ -707,6 +708,7 @@ class Server:
 
         else:
             # client died unexpectedly
+            logger.info(f"Client socket disconnected: {getattr(from_sock, 'fileno', lambda: 'n/a')()}")
             self.logout(from_sock)
 
 # ==============================================================================
