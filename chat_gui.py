@@ -1,9 +1,3 @@
-"""
-chat_gui.py - Tkinter GUI for the ICDS Chat System
-
-Author: Sanaa
-"""
-
 import tkinter as tk
 from tkinter import scrolledtext, messagebox
 import threading
@@ -15,6 +9,7 @@ from tkinter import simpledialog
 from chat_utils import *
 from chat_bot_client import ChatBotClient
 from sentiment import get_sentiment
+import nlp_tools
 
 from snake import SnakeGame
 from tictactoe import TicTacToeMultiplayerWindow
@@ -30,6 +25,7 @@ FRIENDLY_MENU = """
   /bye                Leave current chat
   /? <word>           Search chat history      (e.g.  ? hello)
   /p <number>         Get a Shakespeare sonnet (e.g.  p 18)
+  /aipic: <prompt>    Generate an AI image       (e.g.  /aipic: a cat)
   /q                  Quit the app
 --------------------------
 """
@@ -176,10 +172,6 @@ class GUIClient:
         name_e = tk.Entry(win, bg=BG_INPUT, fg=TEXT_MAIN)
         name_e.pack(padx=12, pady=(2,8))
 
-        tk.Label(win, text="Email", bg=BG_DARK, fg=TEXT_DIM).pack(anchor="w", padx=12)
-        email_e = tk.Entry(win, bg=BG_INPUT, fg=TEXT_MAIN)
-        email_e.pack(padx=12, pady=(2,8))
-
         tk.Label(win, text="Password", bg=BG_DARK, fg=TEXT_DIM).pack(anchor="w", padx=12)
         pw_e = tk.Entry(win, bg=BG_INPUT, fg=TEXT_MAIN, show='*')
         pw_e.pack(padx=12, pady=(2,8))
@@ -193,16 +185,15 @@ class GUIClient:
 
         def _submit():
             uname = name_e.get().strip()
-            email = email_e.get().strip()
             p1 = pw_e.get()
             p2 = pw2_e.get()
-            if not uname or not email or not p1:
+            if not uname or not p1:
                 status.config(text="Please fill all fields.")
                 return
             if p1 != p2:
                 status.config(text="Passwords do not match.")
                 return
-            resp = self._server_request({"action": "signup", "name": uname, "email": email, "password": p1})
+            resp = self._server_request({"action": "signup", "name": uname, "password": p1})
             if not resp:
                 status.config(text="Server unreachable.")
                 return
@@ -233,20 +224,15 @@ class GUIClient:
         name_e = tk.Entry(win, bg=BG_INPUT, fg=TEXT_MAIN)
         name_e.pack(padx=12, pady=(2,8))
 
-        tk.Label(win, text="Email", bg=BG_DARK, fg=TEXT_DIM).pack(anchor="w", padx=12)
-        email_e = tk.Entry(win, bg=BG_INPUT, fg=TEXT_MAIN)
-        email_e.pack(padx=12, pady=(2,8))
-
         status = tk.Label(win, text="", bg=BG_DARK, fg=ACCENT)
         status.pack(pady=(4,8))
 
         def _submit():
             uname = name_e.get().strip()
-            email = email_e.get().strip()
-            if not uname or not email:
+            if not uname:
                 status.config(text="Please fill both fields.")
                 return
-            resp = self._server_request({"action": "forgot", "name": uname, "email": email})
+            resp = self._server_request({"action": "forgot", "name": uname})
             if not resp:
                 status.config(text="Server unreachable.")
                 return
@@ -356,8 +342,6 @@ class GUIClient:
                 padx=12, pady=4
             ).pack(side="left", padx=4, pady=5)
 
-        _btn("WHO",      lambda: self.send_command("who"))
-        _btn("TIME",     lambda: self.send_command("time"))
         _btn("HELP",     lambda: self.append_msg("system", FRIENDLY_MENU))
         _btn("BOT CHAT", self.toggle_bot_mode)
 
@@ -374,6 +358,9 @@ class GUIClient:
             padx=12, pady=4
         )
         self.sentiment_btn.pack(side="left", padx=4, pady=5)
+
+        _btn("KEYWORDS", self.do_keywords)
+        _btn("SUMMARY", self.do_summary)
 
         tk.Button(
             btn_bar, text="DISCONNECT", command=self.disconnect_from_peer,
@@ -424,7 +411,7 @@ class GUIClient:
         tk.Button(
             input_row, text="😊", command=self._open_emoji_picker,
             bg=BG_INPUT, fg="white", font=("Courier New", 12),
-            relief="flat", cursor="hand2", bd=0, padx=8
+            relief="flat", cursor="hand2", bd=0, padx=24, pady=8
         ).pack(side="left", padx=(6, 0))
 
         # Middle frame: bot_bar (hidden) stacked above chat_area
@@ -574,6 +561,16 @@ class GUIClient:
             poem_idx = cmd[2:].strip()
             if poem_idx.isdigit():
                 return {"action": "poem", "target": poem_idx}
+        if low.startswith("keywords"):
+            parts = cmd.split()
+            top_k = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 5
+            self.do_keywords(top_k)
+            return None  # Local action, no server payload
+        if low.startswith("summary"):
+            parts = cmd.split()
+            sentences = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 3
+            self.do_summary(sentences)
+            return None  # Local action, no server payload
         return None
 
     def _send_text(self, text):
@@ -959,6 +956,45 @@ class GUIClient:
     # ==========================================================================
     # SENTIMENT
     # ==========================================================================
+    def get_chat_messages(self, max_lines=50):
+        """Extract recent chat messages from chat_area as List[str]."""
+        full_text = self.chat_area.get("1.0", tk.END)
+        lines = full_text.splitlines()
+        recent_lines = lines[-max_lines:] if len(lines) > max_lines else lines
+        messages = []
+        for line in recent_lines:
+            line = line.strip()
+            if line and ': ' in line and not line.startswith(' ' * 36):  # skip sentiment lines
+                # Extract content after ": "
+                content = line.split(': ', 1)[1] if ': ' in line else line
+                messages.append(content)
+        return messages
+
+    def do_keywords(self, top_k=5):
+        messages = self.get_chat_messages()
+        if not messages:
+            self.append_msg("system", "No chat history available.")
+            return
+        try:
+            keywords = nlp_tools.extract_keywords_yake(messages, top_k)
+            kw_str = ', '.join(keywords)
+            self.append_msg("system", f"=== KEYWORDS (top {top_k}): {kw_str} ===")
+        except Exception as e:
+            self.append_msg("error", f"Keywords error: {e}")
+
+    def do_summary(self, sentences=3):
+        messages = self.get_chat_messages()
+        if not messages:
+            self.append_msg("system", "No chat history available.")
+            return
+        try:
+            summary = nlp_tools.summarize_with_sumy(messages, sentences)
+            sum_str = '\\n'.join(summary)
+            self.append_msg("system", f"=== SUMMARY ({sentences} sentences): ===")
+            self.append_msg("system", sum_str)
+        except Exception as e:
+            self.append_msg("error", f"Summary error: {e}")
+
     def toggle_sentiment(self):
         self.sentiment_on = not self.sentiment_on
         status = "ON"       if self.sentiment_on else "OFF"
