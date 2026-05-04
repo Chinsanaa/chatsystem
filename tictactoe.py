@@ -57,6 +57,8 @@ class TicTacToeMultiplayerWindow:
 
         self.window = tk.Toplevel(self.root)
         self.window.title(f"{title_prefix} - Tic Tac Toe")
+        # Position next to main window
+        self.window.geometry("450x550")
 
         self.label_top = tk.Label(self.window, text="Waiting for opponent...", font=("Arial", 12))
         self.label_top.pack(pady=(8, 4))
@@ -97,8 +99,8 @@ class TicTacToeMultiplayerWindow:
         self.decline_btn.grid(row=0, column=1, padx=5)
 
         self.leave_btn = tk.Button(
-            self.actions_frame, text="LEAVE", font=("Arial", 10),
-            width=10, state="disabled", command=self.leave
+            self.actions_frame, text="CLOSE", font=("Arial", 10),
+            width=10, state="normal", command=self.window.destroy
         )
         self.leave_btn.grid(row=0, column=2, padx=5)
 
@@ -124,7 +126,7 @@ class TicTacToeMultiplayerWindow:
         self.status = "pending"
 
         self._render_board()
-        self.label_top.config(text=f"Challenge from {self.opponent_name}")
+        self.label_top.config(text=f"Challenge from {self.opponent_name or 'Unknown'}")
         self.status_label.config(text="Do you accept the game?")
 
         self.accept_btn.config(state="normal")
@@ -142,10 +144,7 @@ class TicTacToeMultiplayerWindow:
         self.your_symbol = payload.get("your_symbol")
         players = payload.get("players", {})
 
-        if self.your_symbol == "X":
-            self.opponent_name = players.get("O")
-        else:
-            self.opponent_name = players.get("X")
+        self.opponent_name = payload.get("opponent") or players.get("O" if self.your_symbol == "X" else "X") or "Unknown"
 
         self.board = list(payload.get("board", [""] * 9))
         self.turn = payload.get("turn", "X")
@@ -156,9 +155,11 @@ class TicTacToeMultiplayerWindow:
         self.accept_btn.config(state="disabled")
         self.decline_btn.config(state="disabled")
 
-        self.leave_btn.config(state="normal" if self.status != "finished" else "disabled")
+        self.leave_btn.config(state="normal")
         self._sync_controls_from_state()
         self._render_board()
+        self.label_top.config(text=f"vs {self.opponent_name }" or "Tic Tac Toe")
+
         self._render_status()
 
     def on_state(self, payload: Dict[str, Any]):
@@ -171,7 +172,7 @@ class TicTacToeMultiplayerWindow:
         self.draw = bool(payload.get("draw", False))
         self.status = payload.get("status", "playing")
 
-        self.leave_btn.config(state="normal" if self.status != "finished" else "disabled")
+        self.leave_btn.config(state="normal")
         self._sync_controls_from_state()
         self._render_board()
         self._render_status()
