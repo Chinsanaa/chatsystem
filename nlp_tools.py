@@ -65,12 +65,40 @@ def summarize_with_sumy(messages: List[str], sentences_count: int = 3) -> List[s
         return []
 
     text = "\n".join(messages)
+    # Try the Sumy/Luhn summarizer first. If required NLTK tokenizers or
+    # Sumy internals are unavailable (common in offline or restricted
+    # environments), fall back to a lightweight frequency-based summarizer.
+    try:
+        parser = PlaintextParser.from_string(text, Tokenizer("english"))
+        summarizer = LuhnSummarizer()
+        summary_sentences = summarizer(parser.document, sentences_count)
+        return [str(sentence) for sentence in summary_sentences]
+    except Exception:
+        # Fallback summarizer: simple extractive selection based on word
+        # frequencies. This is intentionally small and dependency-free and
+        # produces a reasonable short summary when Sumy is unavailable.
+        import re
+        from collections import Counter
 
-    parser = PlaintextParser.from_string(text, Tokenizer("english"))
-    summarizer = LuhnSummarizer()
+        # Split into candidate sentences using a simple regex.
+        cand_sents = [s.strip() for s in re.split(r'[\n\.!?]+', text) if s.strip()]
+        if not cand_sents:
+            return []
 
-    summary_sentences = summarizer(parser.document, sentences_count)
-    return [str(sentence) for sentence in summary_sentences]
+        # Tokenize and count word frequencies (lowercased, alphanumeric tokens).
+        words = re.findall(r"\w+", text.lower())
+        stopwords = set(["the", "and", "is", "in", "to", "a", "of", "it", "we", "you", "i"])
+        words = [w for w in words if w not in stopwords]
+        freq = Counter(words)
+
+        # Score sentences by sum of word frequencies.
+        def score_sentence(s):
+            tokens = re.findall(r"\w+", s.lower())
+            return sum(freq.get(t, 0) for t in tokens)
+
+        scored = sorted(((score_sentence(s), s) for s in cand_sents), reverse=True)
+        top = [s for _, s in scored[:max(1, min(len(scored), sentences_count))]]
+        return top
 
 # ---------------------------
 # Small demo (optional)

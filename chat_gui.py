@@ -16,7 +16,6 @@ import nlp_tools
 
 from snake import SnakeGame
 from tictactoe import TicTacToeMultiplayerWindow
-
 # ==============================================================================
 # Friendly command reference (replaces raw terminal menu string)
 # ==============================================================================
@@ -50,6 +49,13 @@ ONLINE_DOT = "#4ecca3"
 # ==============================================================================
 class GUIClient:
     def __init__(self, args):
+        # The GUIClient coordinates the local Tk UI, a background recv thread,
+        # and a single TCP socket connected to the central chat server.
+        # High-level responsibilities:
+        # - render login/signup dialogs
+        # - manage connection state and the send/receive paths
+        # - provide small local features (bot, sentiment, keywords)
+        # The constructor builds the login screen and starts the Tk mainloop.
         self.args    = args
         self.name    = ""
         self.state   = S_OFFLINE
@@ -364,6 +370,7 @@ class GUIClient:
             else:
                 status.config(text="Signup failed.")
 
+        # Single create button (removed accidental duplicate)
         tk.Button(win, text="Create", command=_submit, bg=ACCENT, fg="white").pack(pady=(0,12))
 
         tk.Button(win, text="Create", command=_submit, bg=ACCENT, fg="white").pack(pady=(0,12))
