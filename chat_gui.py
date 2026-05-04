@@ -10,10 +10,14 @@ import threading
 import socket
 import json
 import argparse
+from tkinter import simpledialog
 
 from chat_utils import *
 from chat_bot_client import ChatBotClient
 from sentiment import get_sentiment
+
+from snake import SnakeGame
+from tictactoe import TicTacToeMultiplayerWindow
 
 # ==============================================================================
 # Friendly command reference (replaces raw terminal menu string)
@@ -51,6 +55,10 @@ class GUIClient:
         self.name    = ""
         self.state   = S_OFFLINE
         self.socket  = None
+
+        # Game windows (single-instance per client)
+        self.snake_window = None
+        self.ttt_window = None
 
         self.bot          = ChatBotClient(personality="friendly")
         self.bot_mode     = False
@@ -174,6 +182,11 @@ class GUIClient:
         _btn("TIME",     lambda: self.send_command("time"))
         _btn("HELP",     lambda: self.append_msg("system", FRIENDLY_MENU))
         _btn("BOT CHAT", self.toggle_bot_mode)
+
+        # Games
+        _btn("SNAKE", lambda: self.open_snake_window())
+        _btn("LEADERBOARD", lambda: self.request_snake_leaderboard())
+        _btn("TICTACTOE", lambda: self.invite_tictactoe())
 
         self.sentiment_btn = tk.Button(
             btn_bar, text="SENTIMENT: ON", command=self.toggle_sentiment,
@@ -458,6 +471,67 @@ class GUIClient:
         except Exception as e:
             self.append_msg("error", f"[command error: {e}]")
 
+    def _server_send_json(self, payload: dict):
+        """Send a JSON action to the server over the already-established chat socket."""
+        if not self.socket:
+            return
+        mysend(self.socket, json.dumps(payload))
+
+    def request_snake_leaderboard(self):
+        self.append_msg("system", "Requesting snake leaderboard...")
+        try:
+            self._server_send_json({"action": "snake_leaderboard"})
+        except Exception as e:
+            self.append_msg("error", f"[snake leaderboard error: {e}]")
+
+    def open_snake_window(self):
+        # Create one Toplevel window per client.
+        try:
+            if self.snake_window is not None and self.snake_window.winfo_exists():
+                self.snake_window.lift()
+                return
+        except Exception:
+            pass
+
+        win = tk.Toplevel(self.root)
+        win.title("Snake")
+        self.snake_window = SnakeGame(
+            win,
+            username=self.name,
+            client_socket=self.socket,
+            send_json=self._server_send_json,
+        )
+
+    def invite_tictactoe(self):
+        peer = simpledialog.askstring("Tic Tac Toe", "Opponent username:")
+        if not peer:
+            return
+
+        try:
+            if self.ttt_window is not None and self.ttt_window.window.winfo_exists():
+                self.ttt_window.window.lift()
+            else:
+                self.ttt_window = TicTacToeMultiplayerWindow(
+                    self.root,
+                    title_prefix="Multiplayer",
+                    username=self.name,
+                    send_json=self._server_send_json,
+                )
+        except Exception:
+            self.ttt_window = TicTacToeMultiplayerWindow(
+                self.root,
+                title_prefix="Multiplayer",
+                username=self.name,
+                send_json=self._server_send_json,
+            )
+
+        # Invite opponent (server will start game after accept)
+        try:
+            self._server_send_json({"action": "ttt_invite", "target": peer})
+            self.append_msg("system", f"TicTacToe invite sent to {peer}.")
+        except Exception as e:
+            self.append_msg("error", f"[ttt invite error: {e}]")
+
     def disconnect_from_peer(self):
         """DISCONNECT button — only valid while in S_CHATTING."""
         if self.state != S_CHATTING:
@@ -497,17 +571,11 @@ class GUIClient:
                     # Incoming chat message — display directly, no SM needed
                     sender  = parsed.get("from", "peer")
                     message = parsed.get("message", "")
-
-                    if str(sender).strip() == "[Bot]":
-                        # Render bot lines in the bot style/stream.
-                        self.append_msg("bot", f"[Bot]: {message}")
-                    else:
-                        self.append_msg("peer", f"{sender}: {message}")
-                        # Only trigger bot when the user message contains the @bot mention.
-                        if self.bot.should_respond(message):
-                            clean = self.bot.extract_message(message)
-                            threading.Thread(target=self._broadcast_bot_reply,
-                                             args=(clean, sender), daemon=True).start()
+                    self.append_msg("peer", f"{sender}: {message}")
+                    if self.bot.should_respond(message):
+                        clean = self.bot.extract_message(message)
+                        threading.Thread(target=self._broadcast_bot_reply,
+                                         args=(clean, sender), daemon=True).start()
 
                 elif action == "disconnect":
                     # Peer left the chat
@@ -546,6 +614,60 @@ class GUIClient:
                 elif action == "search":
                     results = (parsed.get("results", "") or "").strip()
                     self.append_msg("system", results if results else "No matches found.")
+                elif action == "snake_leaderboard":
+                    self.append_msg("system", parsed.get("results", ""))
+                elif action == "snake_submit_score":
+                    leaderboard = parsed.get("leaderboard", "")
+                    score = parsed.get("score", "")
+                    self.append_msg("system", f"Snake score submitted: {score}")
+                    if leaderboard:
+                        self.append_msg("system", leaderboard)
+                elif action == "ttt_invite":
+                    # inviter confirmation (optional UI)
+                    if parsed.get("status") == "sent":
+                        self.append_msg("system", f"TicTacToe invite sent. Game id: {parsed.get('game_id')}")
+                elif action == "ttt_challenge":
+                    payload = parsed
+                    def _handle():
+                        if self.ttt_window is None or not getattr(self.ttt_window.window, "winfo_exists", lambda: False)():
+                            self.ttt_window = TicTacToeMultiplayerWindow(
+                                self.root,
+                                title_prefix="Multiplayer",
+                                username=self.name,
+                                send_json=self._server_send_json,
+                            )
+                        self.ttt_window.on_challenge(payload)
+                    self.root.after(0, _handle)
+                elif action == "ttt_start":
+                    payload = parsed
+                    def _handle():
+                        if self.ttt_window is None or not getattr(self.ttt_window.window, "winfo_exists", lambda: False)():
+                            self.ttt_window = TicTacToeMultiplayerWindow(
+                                self.root,
+                                title_prefix="Multiplayer",
+                                username=self.name,
+                                send_json=self._server_send_json,
+                            )
+                        self.ttt_window.on_start(payload)
+                    self.root.after(0, _handle)
+                elif action == "ttt_state":
+                    payload = parsed
+                    def _handle():
+                        if self.ttt_window is not None:
+                            self.ttt_window.on_state(payload)
+                    self.root.after(0, _handle)
+                elif action == "ttt_abort":
+                    payload = parsed
+                    def _handle():
+                        if self.ttt_window is not None:
+                            self.ttt_window.on_abort(payload)
+                    self.root.after(0, _handle)
+                elif action == "ttt_declined":
+                    payload = parsed
+                    def _handle():
+                        if self.ttt_window is not None:
+                            self.ttt_window.on_abort({"reason": payload.get("reason", "declined")})
+                    self.root.after(0, _handle)
                 elif action == "error":
                     reason = parsed.get("reason", "unknown server error")
                     self.append_msg("error", f"[server error: {reason}]")
@@ -619,12 +741,10 @@ class GUIClient:
         if self.state == S_CHATTING:
             self.root.after(0, lambda: self.append_msg("bot", f"[Bot]: {reply}"))
             try:
-                # Do NOT include "@bot" in the broadcast; otherwise receivers will
-                # trigger should_respond() again and create a ping-pong loop.
                 mysend(self.socket, json.dumps({
                     "action": "exchange",
                     "from": "[Bot]",
-                    "message": reply
+                    "message": f"@bot replies: {reply}"
                 }))
             except Exception:
                 pass
