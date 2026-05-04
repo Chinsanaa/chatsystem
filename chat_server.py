@@ -32,18 +32,11 @@ import chat_group as grp
 # for interactive debugging. Users can adjust the level as needed.
 logger = logging.getLogger('chat_server')
 if not logger.handlers:
-    logger.setLevel(logging.DEBUG)
-    fmt = logging.Formatter('%(asctime)s %(levelname)s %(name)s: %(message)s')
+    logger.setLevel(logging.INFO)
+    fmt = logging.Formatter('%(asctime)s %(levelname)s: %(message)s')
     sh = logging.StreamHandler()
     sh.setFormatter(fmt)
     logger.addHandler(sh)
-    try:
-        fh = RotatingFileHandler('chat_server.log', maxBytes=5 * 1024 * 1024, backupCount=3)
-        fh.setFormatter(fmt)
-        logger.addHandler(fh)
-    except Exception:
-        # If file handler cannot be created (permission issues), continue with console only.
-        logger.debug('Could not create RotatingFileHandler; continuing without file logging')
 
 
 # Simple JSON-backed user store (demo only). Passwords are hashed with SHA-256.
@@ -113,16 +106,16 @@ class Server:
             self.server.bind(SERVER)
             self.server.listen(5)
             self.all_sockets.append(self.server)
-            logger.info(f"Server listening on {self.server.getsockname()}")
+            print(f"Server listening on {self.server.getsockname()}")
         except OSError as e:
-            # Surface a helpful message for the operator and re-raise so
-            # external supervisors/tests can handle the failure.
-            logger.error(f"Failed to bind server on {SERVER}: {e}")
+            print(f"Failed to bind server on {SERVER}: {e}")
             raise
         # initialize past chat indices
         self.indices = {}
         # sonnet
         self.sonnet = indexer.PIndex("AllSonnets.txt")
+        self.games = {}
+        self.pending_games = {}
 
     def new_client(self, sock):
         """Register a newly-accepted socket.
@@ -218,7 +211,7 @@ class Server:
                     users[name] = {"pw_hash": _hash_password(password)}
                     _save_users(users)
                     mysend(sock, json.dumps({"action": "signup", "status": "ok"}))
-                    logger.info(f"Created new user: {name}")
+                    print(f"Created new user: '{name}'")
                     return
                 if action == "forgot":
                     name = msg.get("name", "").strip()
@@ -235,7 +228,7 @@ class Server:
                     users[name]["pw_hash"] = _hash_password(temp)
                     _save_users(users)
                     mysend(sock, json.dumps({"action": "forgot", "status": "ok", "temp": temp}))
-                    logger.info(f"Issued temporary password for user: {name}")
+                    print(f"Issued temp password for '{name}'")
                     return
 
                 if msg["action"] == "login":
@@ -276,11 +269,11 @@ class Server:
                         self.group.join(name)
                         mysend(sock, json.dumps(
                             {"action": "login", "status": "ok"}))
-                        logger.info(f"User logged in: {name}")
+                        print(f"User '{name}' logged in")
                     else:  # a client under this name has already logged in
                         mysend(sock, json.dumps(
                             {"action": "login", "status": "duplicate"}))
-                        logger.info(f"Duplicate login attempt for user: {name}")
+                        print(f"User '{name}' already logged in elsewhere")
                 else:
                     self._drop_socket(sock)
             else:  # client died unexpectedly
@@ -316,7 +309,21 @@ class Server:
             sock.close()
         except Exception:
             pass
-        logger.debug(f"Logged out socket: {getattr(sock, 'fileno', lambda: 'n/a')()}")
+        logger.debug(f"Logged out socket {getattr(sock, 'fileno', lambda: 'n/a')()}")
+
+
+    def check_winner(self, board):
+        WIN_TRIPLES = [
+            (0,1,2), (3,4,5), (6,7,8),
+            (0,3,6), (1,4,7), (2,5,8),
+            (0,4,8), (2,4,6)
+        ]
+        for a,b,c in WIN_TRIPLES:
+            if board[a] == board[b] == board[c] != '':
+                return board[a]
+        if '' not in board:
+            return 'draw'
+        return None
 
 # ==============================================================================
 # main command switchboard
@@ -373,7 +380,7 @@ class Server:
                     msg = json.dumps(
                         {"action": "connect", "status": "no-user"})
                 mysend(from_sock, msg)
-                logger.debug(f"Connect response to {from_name}: {msg}")
+
             # -------------------- signup --------------------
             elif action == "signup":
                 # signup expects name and password (email removed)
@@ -543,9 +550,157 @@ class Server:
                 # ---- end of your code --- #
                 mysend(from_sock, json.dumps(
                     {"action": "search", "results": search_rslt}))
+
+            # -------------------- Snake Leaderboard --------------------
+            elif action == "snake_leaderboard":
+                try:
+                    import scoreboard
+                    lb = scoreboard.get_leaderboard()
+                    mysend(from_sock, json.dumps({"action": "snake_leaderboard", "results": lb}))
+                except Exception as e:
+                    self._send_error(from_sock, f"Leaderboard error: {e}")
+
+            elif action == "ttt_invite":
+                import time
+                from_name = self.logged_sock2name[from_sock]
+                target = msg.get("target", "").strip()
+                if not target or target == from_name:
+                    self._send_error(from_sock, "invalid target")
+                    return
+                if target not in self.logged_name2sock:
+                    self._send_error(from_sock, "target offline")
+                    return
+                game_id = f"ttt_{from_name}_{target}_{int(time.time())}"
+                self.pending_games[game_id] = {"inviter": from_name, "target": target}
+                target_sock = self.logged_name2sock[target]
+                challenge = {"action": "ttt_challenge", "game_id": game_id, "from": from_name, "your_symbol": "O"}
+                self._safe_send(target_sock, json.dumps(challenge))
+                sent = {"action": "ttt_invite", "status": "sent", "game_id": game_id}
+                mysend(from_sock, json.dumps(sent))
+                logger.info(f"TTT invite {game_id}: {from_name} -> {target}")
+
+            # -------------------- Snake Submit Score --------------------  
+            elif action == "snake_submit_score":
+                score = msg.get("score")
+                from_name = self.logged_sock2name[from_sock]
+                try:
+                    import scoreboard
+                    scoreboard.update_score(from_name, score)
+                    lb = scoreboard.get_leaderboard()
+                    response = {
+                        "action": "snake_submit_score",
+                        "score": score,
+                        "leaderboard": lb
+                    }
+                    mysend(from_sock, json.dumps(response))
+                    print(f"Snake score {score} by '{from_name}'")
+                except Exception as e:
+                    self._send_error(from_sock, f"Score submit error: {e}")
+
+            elif action == "ttt_accept":
+                game_id = msg.get("game_id")
+                if game_id not in self.pending_games:
+                    self._send_error(from_sock, "no pending game")
+                    return
+                pending = self.pending_games.pop(game_id)
+                inviter = pending["inviter"]
+                acceptor = self.logged_sock2name[from_sock]
+                if acceptor != pending["target"]:
+                    self._send_error(from_sock, "not your game")
+                    return
+                state = {
+                    "board": [""] * 9,
+                    "turn": "X",
+                    "inviter": inviter,
+                    "acceptor": acceptor,
+                    "winner": None,
+                    "draw": False
+                }
+                self.games[game_id] = state
+                for player, symbol in [(inviter, "X"), (acceptor, "O")]:
+                    player_sock = self.logged_name2sock[player]
+                    start_payload = {
+                        "action": "ttt_start",
+                        "game_id": game_id,
+                        "board": state["board"],
+                        "turn": state["turn"],
+                        "your_symbol": symbol,
+                        "players": {"X": inviter, "O": acceptor},
+                        "status": "playing",
+                        "opponent": acceptor if symbol == "X" else inviter
+                    }
+                    self._safe_send(player_sock, json.dumps(start_payload))
+                logger.info(f"TTT {game_id} started: {inviter}(X) vs {acceptor}(O)")
+
+            elif action == "ttt_move":
+                game_id = msg.get("game_id")
+                index = msg.get("index")
+                if not game_id or game_id not in self.games:
+                    self._send_error(from_sock, "no game")
+                    return
+                try:
+                    index = int(index)
+                    if not 0 <= index < 9:
+                        self._send_error(from_sock, "invalid index")
+                        return
+                except:
+                    self._send_error(from_sock, "bad index")
+                    return
+                state = self.games[game_id]
+                player = self.logged_sock2name[from_sock]
+                symbol = "X" if player == state["inviter"] else "O"
+                if symbol != state["turn"]:
+                    self._send_error(from_sock, "not your turn")
+                    return
+                if state["board"][index] != "":
+                    self._send_error(from_sock, "cell taken")
+                    return
+                state["board"][index] = symbol
+                state["turn"] = "O" if symbol == "X" else "X"
+                winner = self.check_winner(state["board"])
+                if winner == "draw":
+                    state["draw"] = True
+                    state["status"] = "finished"
+                elif winner:
+                    state["winner"] = winner
+                    state["status"] = "finished"
+                else:
+                    state["status"] = "playing"
+                for p in [state["inviter"], state["acceptor"]]:
+                    p_sock = self.logged_name2sock[p]
+                    payload = {
+                        "action": "ttt_state",
+                        "game_id": game_id,
+                        "board": state["board"],
+                        "turn": state["turn"],
+                        "winner": state["winner"],
+                        "draw": state["draw"],
+                        "status": state["status"],
+                        "your_symbol": "X" if p == state["inviter"] else "O"
+                    }
+                    self._safe_send(p_sock, json.dumps(payload))
+                logger.info(f"TTT move {game_id} {player}:{index}")
+
+            elif action == "ttt_decline":
+                game_id = msg.get("game_id")
+                if game_id in self.pending_games:
+                    pending = self.pending_games.pop(game_id)
+                    inviter_sock = self.logged_name2sock[pending["inviter"]]
+                    declined = {"action": "ttt_declined", "game_id": game_id, "reason": "declined"}
+                    self._safe_send(inviter_sock, json.dumps(declined))
+
+            elif action == "ttt_leave":
+                game_id = msg.get("game_id")
+                if game_id in self.games:
+                    state = self.games.pop(game_id)
+                    opponent = state["acceptor"] if self.logged_sock2name[from_sock] == state["inviter"] else state["inviter"]
+                    opp_sock = self.logged_name2sock[opponent]
+                    abort = {"action": "ttt_abort", "game_id": game_id, "reason": "left game"}
+                    self._safe_send(opp_sock, json.dumps(abort))
+
             else:
                 self._send_error(from_sock, "unknown action")
-                logger.warning(f"Unknown action from socket {getattr(from_sock, 'fileno', lambda: 'n/a')()}: {action}")
+                logger.debug(f"Unknown action '{action}' from {self.logged_sock2name.get(from_sock, '?')}")
 
 # ==============================================================================
 #                 the "from" guy really, really has had enough

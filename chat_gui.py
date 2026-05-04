@@ -27,7 +27,8 @@ FRIENDLY_MENU = """
   /bye                Leave current chat
   /? <word>           Search chat history      (e.g.  ? hello)
   /p <number>         Get a Shakespeare sonnet (e.g.  p 18)
-  /aipic: <prompt>    Generate an AI image       (e.g.  /aipic: a cat)
+  /keywords            Get chat keywords
+  /summary             Get chat summary
   /q                  Quit the app
 --------------------------
 """
@@ -72,9 +73,14 @@ class GUIClient:
 
         self.root = tk.Tk()
         self.root.title("ICDS Chat")
-        self.root.geometry("780x640")
+        screen_w = self.root.winfo_screenwidth()
+        screen_h = self.root.winfo_screenheight()
+        size_w = max(700, int(screen_w // 3)+100)
+        size_h = max(500, int(screen_h // 3)+100)
+        self.root.geometry(f"{size_w}x{size_h}")
+        self.root.minsize(700, 500)
         self.root.configure(bg=BG_DARK)
-        self.root.resizable(False, False)
+        self.root.resizable(True, True)
         self.root.protocol("WM_DELETE_WINDOW", self._cleanup_and_quit)
 
         self.build_login_screen()
@@ -130,7 +136,7 @@ class GUIClient:
         tk.Button(row, text="SIGN UP", command=self.build_signup_window,
                   bg=BG_DARK, fg=TEXT_MAIN, font=("Courier New", 9), relief="flat",
                   cursor="hand2", bd=0).pack(side="left", padx=8)
-        tk.Button(row, text="FORGOT PW", command=self.build_forgot_window,
+        tk.Button(row, text="Forgot Password", command=self.build_forgot_window,
                   bg=BG_DARK, fg=TEXT_DIM, font=("Courier New", 9), relief="flat",
                   cursor="hand2", bd=0).pack(side="left", padx=8)
 
@@ -373,8 +379,6 @@ class GUIClient:
         # Single create button (removed accidental duplicate)
         tk.Button(win, text="Create", command=_submit, bg=ACCENT, fg="white").pack(pady=(0,12))
 
-        tk.Button(win, text="Create", command=_submit, bg=ACCENT, fg="white").pack(pady=(0,12))
-
     def build_forgot_window(self):
         win = tk.Toplevel(self.root)
         win.title("Forgot Password")
@@ -495,9 +499,8 @@ class GUIClient:
                  font=("Courier New", 13, "bold")).pack(side="right", padx=20, pady=14)
 
         # Button bar
-        btn_bar = tk.Frame(self.root, bg=BG_MID, height=38)
-        btn_bar.pack(fill="x")
-        btn_bar.pack_propagate(False)
+        btn_bar = tk.Frame(self.root, bg=BG_MID)
+        btn_bar.pack(fill="x", pady=5)
 
         def _btn(label, cmd, fg="white"):
             tk.Button(
@@ -524,10 +527,6 @@ class GUIClient:
             padx=12, pady=4
         )
         self.sentiment_btn.pack(side="left", padx=4, pady=5)
-
-        _btn("KEYWORDS", self.do_keywords)
-        _btn("SUMMARY", self.do_summary)
-
         tk.Button(
             btn_bar, text="DISCONNECT", command=self.disconnect_from_peer,
             bg=BG_DARK, fg=ACCENT, font=("Courier New", 8, "bold"),
@@ -561,7 +560,7 @@ class GUIClient:
             relief="solid",
             bd=1
         )
-        self.input_box.pack(side="left", fill="x", expand=True, ipady=7)
+        self.input_box.pack(side="left", fill="x", expand=True, ipady=10, padx=(10,5))
         self.input_box.bind("<Return>", self._on_input_enter)
         self.input_box.bind("<KP_Enter>", self._on_input_enter)
 
@@ -859,12 +858,16 @@ class GUIClient:
             if self.ttt_window is not None and self.ttt_window.window.winfo_exists():
                 self.ttt_window.window.lift()
             else:
-                self.ttt_window = TicTacToeMultiplayerWindow(
+                offset = self.ttt_count * 470
+                game_id = f'game_{self.ttt_count}'
+                self.ttt_games[game_id] = TicTacToeMultiplayerWindow(
                     self.root,
-                    title_prefix="Multiplayer",
+                    title_prefix=f"Multiplayer {game_id}",
                     username=self.name,
                     send_json=self._server_send_json,
                 )
+                self.ttt_window = self.ttt_games[game_id]  # current
+                self.ttt_count += 1
         except Exception:
             self.ttt_window = TicTacToeMultiplayerWindow(
                 self.root,
@@ -1043,7 +1046,7 @@ class GUIClient:
                     reason = parsed.get("reason", "unknown server error")
                     self.append_msg("error", f"[server error: {reason}]")
                 else:
-                    self.append_msg("error", f"[unknown server action: {action}]")
+                    self.append_msg("system", f"[server action: {action}]")  # Ignore unknown for clean chat
 
             except OSError:
                 break
