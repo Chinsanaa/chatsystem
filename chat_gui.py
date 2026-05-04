@@ -6,18 +6,17 @@ Author: Sanaa
 
 import tkinter as tk
 from tkinter import scrolledtext, messagebox
+import os
+import time
+PIL_AVAILABLE = False
 import threading
 import socket
 import json
 import argparse
-from tkinter import simpledialog
 
 from chat_utils import *
 from chat_bot_client import ChatBotClient
 from sentiment import get_sentiment
-
-from snake import SnakeGame
-from tictactoe import TicTacToeMultiplayerWindow
 
 # ==============================================================================
 # Friendly command reference (replaces raw terminal menu string)
@@ -55,10 +54,6 @@ class GUIClient:
         self.name    = ""
         self.state   = S_OFFLINE
         self.socket  = None
-
-        # Game windows (single-instance per client)
-        self.snake_window = None
-        self.ttt_window = None
 
         self.bot          = ChatBotClient(personality="friendly")
         self.bot_mode     = False
@@ -119,13 +114,14 @@ class GUIClient:
             activebackground=ACCENT2, activeforeground="white",
             padx=30, pady=10
         ).pack()
+
         # Sign up / Forgot password row
         row = tk.Frame(self.login_frame, bg=BG_DARK)
         row.pack(pady=(10,0))
         tk.Button(row, text="SIGN UP", command=self.build_signup_window,
                   bg=BG_DARK, fg=TEXT_MAIN, font=("Courier New", 9), relief="flat",
                   cursor="hand2", bd=0).pack(side="left", padx=8)
-        tk.Button(row, text="FORGOT PW", command=self.build_forgot_window,
+        tk.Button(row, text="FORGOT PASSWORD", command=self.build_forgot_window,
                   bg=BG_DARK, fg=TEXT_DIM, font=("Courier New", 9), relief="flat",
                   cursor="hand2", bd=0).pack(side="left", padx=8)
 
@@ -176,10 +172,6 @@ class GUIClient:
         name_e = tk.Entry(win, bg=BG_INPUT, fg=TEXT_MAIN)
         name_e.pack(padx=12, pady=(2,8))
 
-        tk.Label(win, text="Email", bg=BG_DARK, fg=TEXT_DIM).pack(anchor="w", padx=12)
-        email_e = tk.Entry(win, bg=BG_INPUT, fg=TEXT_MAIN)
-        email_e.pack(padx=12, pady=(2,8))
-
         tk.Label(win, text="Password", bg=BG_DARK, fg=TEXT_DIM).pack(anchor="w", padx=12)
         pw_e = tk.Entry(win, bg=BG_INPUT, fg=TEXT_MAIN, show='*')
         pw_e.pack(padx=12, pady=(2,8))
@@ -193,16 +185,15 @@ class GUIClient:
 
         def _submit():
             uname = name_e.get().strip()
-            email = email_e.get().strip()
             p1 = pw_e.get()
             p2 = pw2_e.get()
-            if not uname or not email or not p1:
+            if not uname or not p1:
                 status.config(text="Please fill all fields.")
                 return
             if p1 != p2:
                 status.config(text="Passwords do not match.")
                 return
-            resp = self._server_request({"action": "signup", "name": uname, "email": email, "password": p1})
+            resp = self._server_request({"action": "signup", "name": uname, "password": p1})
             if not resp:
                 status.config(text="Server unreachable.")
                 return
@@ -220,6 +211,8 @@ class GUIClient:
 
         tk.Button(win, text="Create", command=_submit, bg=ACCENT, fg="white").pack(pady=(0,12))
 
+        tk.Button(win, text="Create", command=_submit, bg=ACCENT, fg="white").pack(pady=(0,12))
+
     def build_forgot_window(self):
         win = tk.Toplevel(self.root)
         win.title("Forgot Password")
@@ -233,20 +226,17 @@ class GUIClient:
         name_e = tk.Entry(win, bg=BG_INPUT, fg=TEXT_MAIN)
         name_e.pack(padx=12, pady=(2,8))
 
-        tk.Label(win, text="Email", bg=BG_DARK, fg=TEXT_DIM).pack(anchor="w", padx=12)
-        email_e = tk.Entry(win, bg=BG_INPUT, fg=TEXT_MAIN)
-        email_e.pack(padx=12, pady=(2,8))
+    # email removed from forgot password flow
 
         status = tk.Label(win, text="", bg=BG_DARK, fg=ACCENT)
         status.pack(pady=(4,8))
 
         def _submit():
             uname = name_e.get().strip()
-            email = email_e.get().strip()
-            if not uname or not email:
-                status.config(text="Please fill both fields.")
+            if not uname:
+                status.config(text="Please enter a username.")
                 return
-            resp = self._server_request({"action": "forgot", "name": uname, "email": email})
+            resp = self._server_request({"action": "forgot", "name": uname})
             if not resp:
                 status.config(text="Server unreachable.")
                 return
@@ -280,6 +270,8 @@ class GUIClient:
                     pass
                 win.destroy()
             tk.Button(frm, text=e, command=_ins, width=3, bg=BG_INPUT, fg=TEXT_MAIN).pack(side='left', padx=4)
+
+    # File-transfer functionality removed per user request
 
     def attempt_login(self):
         name = self.name_entry.get().strip()
@@ -361,11 +353,6 @@ class GUIClient:
         _btn("HELP",     lambda: self.append_msg("system", FRIENDLY_MENU))
         _btn("BOT CHAT", self.toggle_bot_mode)
 
-        # Games
-        _btn("SNAKE", lambda: self.open_snake_window())
-        _btn("LEADERBOARD", lambda: self.request_snake_leaderboard())
-        _btn("TICTACTOE", lambda: self.invite_tictactoe())
-
         self.sentiment_btn = tk.Button(
             btn_bar, text="SENTIMENT: ON", command=self.toggle_sentiment,
             bg=ACCENT2, fg=ONLINE_DOT, font=("Courier New", 8, "bold"),
@@ -420,11 +407,12 @@ class GUIClient:
             padx=24, pady=8
         ).pack(side="left", padx=(10, 0))
 
-        # Emoji picker button
+        # Emoji picker button (styled like SEND)
         tk.Button(
             input_row, text="😊", command=self._open_emoji_picker,
-            bg=BG_INPUT, fg="white", font=("Courier New", 12),
-            relief="flat", cursor="hand2", bd=0, padx=8
+            bg=ACCENT, fg="white", font=("Courier New", 11, "bold"),
+            relief="flat", cursor="hand2", bd=0,
+            padx=18, pady=6
         ).pack(side="left", padx=(6, 0))
 
         # Middle frame: bot_bar (hidden) stacked above chat_area
@@ -656,67 +644,6 @@ class GUIClient:
         except Exception as e:
             self.append_msg("error", f"[command error: {e}]")
 
-    def _server_send_json(self, payload: dict):
-        """Send a JSON action to the server over the already-established chat socket."""
-        if not self.socket:
-            return
-        mysend(self.socket, json.dumps(payload))
-
-    def request_snake_leaderboard(self):
-        self.append_msg("system", "Requesting snake leaderboard...")
-        try:
-            self._server_send_json({"action": "snake_leaderboard"})
-        except Exception as e:
-            self.append_msg("error", f"[snake leaderboard error: {e}]")
-
-    def open_snake_window(self):
-        # Create one Toplevel window per client.
-        try:
-            if self.snake_window is not None and self.snake_window.winfo_exists():
-                self.snake_window.lift()
-                return
-        except Exception:
-            pass
-
-        win = tk.Toplevel(self.root)
-        win.title("Snake")
-        self.snake_window = SnakeGame(
-            win,
-            username=self.name,
-            client_socket=self.socket,
-            send_json=self._server_send_json,
-        )
-
-    def invite_tictactoe(self):
-        peer = simpledialog.askstring("Tic Tac Toe", "Opponent username:")
-        if not peer:
-            return
-
-        try:
-            if self.ttt_window is not None and self.ttt_window.window.winfo_exists():
-                self.ttt_window.window.lift()
-            else:
-                self.ttt_window = TicTacToeMultiplayerWindow(
-                    self.root,
-                    title_prefix="Multiplayer",
-                    username=self.name,
-                    send_json=self._server_send_json,
-                )
-        except Exception:
-            self.ttt_window = TicTacToeMultiplayerWindow(
-                self.root,
-                title_prefix="Multiplayer",
-                username=self.name,
-                send_json=self._server_send_json,
-            )
-
-        # Invite opponent (server will start game after accept)
-        try:
-            self._server_send_json({"action": "ttt_invite", "target": peer})
-            self.append_msg("system", f"TicTacToe invite sent to {peer}.")
-        except Exception as e:
-            self.append_msg("error", f"[ttt invite error: {e}]")
-
     def disconnect_from_peer(self):
         """DISCONNECT button — only valid while in S_CHATTING."""
         if self.state != S_CHATTING:
@@ -812,6 +739,7 @@ class GUIClient:
 
                 elif action == "time":
                     self.append_msg("system", "Time is: " + parsed.get("results", ""))
+                # file transfer removed
                 elif action == "list":
                     self.append_msg("system", "Here are all the users in the system:")
                     self.append_msg("system", parsed.get("results", ""))
@@ -821,60 +749,6 @@ class GUIClient:
                 elif action == "search":
                     results = (parsed.get("results", "") or "").strip()
                     self.append_msg("system", results if results else "No matches found.")
-                elif action == "snake_leaderboard":
-                    self.append_msg("system", parsed.get("results", ""))
-                elif action == "snake_submit_score":
-                    leaderboard = parsed.get("leaderboard", "")
-                    score = parsed.get("score", "")
-                    self.append_msg("system", f"Snake score submitted: {score}")
-                    if leaderboard:
-                        self.append_msg("system", leaderboard)
-                elif action == "ttt_invite":
-                    # inviter confirmation (optional UI)
-                    if parsed.get("status") == "sent":
-                        self.append_msg("system", f"TicTacToe invite sent. Game id: {parsed.get('game_id')}")
-                elif action == "ttt_challenge":
-                    payload = parsed
-                    def _handle():
-                        if self.ttt_window is None or not getattr(self.ttt_window.window, "winfo_exists", lambda: False)():
-                            self.ttt_window = TicTacToeMultiplayerWindow(
-                                self.root,
-                                title_prefix="Multiplayer",
-                                username=self.name,
-                                send_json=self._server_send_json,
-                            )
-                        self.ttt_window.on_challenge(payload)
-                    self.root.after(0, _handle)
-                elif action == "ttt_start":
-                    payload = parsed
-                    def _handle():
-                        if self.ttt_window is None or not getattr(self.ttt_window.window, "winfo_exists", lambda: False)():
-                            self.ttt_window = TicTacToeMultiplayerWindow(
-                                self.root,
-                                title_prefix="Multiplayer",
-                                username=self.name,
-                                send_json=self._server_send_json,
-                            )
-                        self.ttt_window.on_start(payload)
-                    self.root.after(0, _handle)
-                elif action == "ttt_state":
-                    payload = parsed
-                    def _handle():
-                        if self.ttt_window is not None:
-                            self.ttt_window.on_state(payload)
-                    self.root.after(0, _handle)
-                elif action == "ttt_abort":
-                    payload = parsed
-                    def _handle():
-                        if self.ttt_window is not None:
-                            self.ttt_window.on_abort(payload)
-                    self.root.after(0, _handle)
-                elif action == "ttt_declined":
-                    payload = parsed
-                    def _handle():
-                        if self.ttt_window is not None:
-                            self.ttt_window.on_abort({"reason": payload.get("reason", "declined")})
-                    self.root.after(0, _handle)
                 elif action == "error":
                     reason = parsed.get("reason", "unknown server error")
                     self.append_msg("error", f"[server error: {reason}]")
@@ -899,6 +773,9 @@ class GUIClient:
             self.chat_area.insert("end", text + "\n", tag)
             self.chat_area.see("end")
         self.root.after(0, _insert)
+
+    def _append_bubble(self, tag, text):
+        pass
 
     def append_sentiment(self, tag, label):
         def _insert():
@@ -948,10 +825,12 @@ class GUIClient:
         if self.state == S_CHATTING:
             self.root.after(0, lambda: self.append_msg("bot", f"[Bot]: {reply}"))
             try:
+                # Do NOT include "@bot" in the broadcast; otherwise receivers will
+                # trigger should_respond() again and create a ping-pong loop.
                 mysend(self.socket, json.dumps({
                     "action": "exchange",
                     "from": "[Bot]",
-                    "message": f"@bot replies: {reply}"
+                    "message": reply
                 }))
             except Exception:
                 pass

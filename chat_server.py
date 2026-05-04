@@ -10,8 +10,6 @@ import select
 import indexer
 import json
 import pickle as pkl
-import scoreboard as sb
-from uuid import uuid4
 from chat_utils import *
 import chat_group as grp
 import os
@@ -56,20 +54,10 @@ class Server:
         # sonnet
         self.sonnet = indexer.PIndex("AllSonnets.txt")
 
-        # ------------------------------------------------------------------
-        # Games state (in-memory)
-        # ------------------------------------------------------------------
-
-        # Snake leaderboard is stored in scoreboard.py (module-level).
-        # For tic-tac-toe we keep per-session state in-memory here.
-        self.ttt_games = {}  # game_id -> game_state dict
-        self.ttt_player_to_game_id = {}  # player_name -> game_id
-        # inviter_name -> {"target": target_name, "game_id": game_id}
-        self.ttt_pending_challenges = {}
-
     def new_client(self, sock):
         # add to all sockets and to new clients
-        sock.setblocking(0)
+        # Keep new sockets in blocking mode so the initial login handshake
+        # (which uses myrecv and expects blocking sockets) works reliably.
         self.new_clients.append(sock)
         self.all_sockets.append(sock)
 
@@ -90,6 +78,26 @@ class Server:
         except Exception:
             pass
 
+    def _safe_send(self, sock, text):
+        """Send text to sock, but handle broken pipes / closed sockets gracefully."""
+        try:
+            mysend(sock, text)
+            return True
+        except (BrokenPipeError, ConnectionResetError):
+            # socket is dead — try to logout/cleanup
+            try:
+                self.logout(sock)
+            except Exception:
+                pass
+            return False
+        except Exception:
+            # best-effort: drop socket
+            try:
+                self._drop_socket(sock)
+            except Exception:
+                pass
+            return False
+
     def login(self, sock):
         # read the msg that should have login code plus username
         try:
@@ -100,27 +108,25 @@ class Server:
                 # Allow signup/forgot during initial handshake (before login)
                 if action == "signup":
                     name = msg.get("name", "").strip()
-                    email = msg.get("email", "").strip()
                     password = msg.get("password", "")
-                    if not name or not email or not password:
+                    if not name or not password:
                         mysend(sock, json.dumps({"action": "signup", "status": "missing-fields"}))
                         return
                     users = _load_users()
                     if name in users:
                         mysend(sock, json.dumps({"action": "signup", "status": "exists"}))
                         return
-                    users[name] = {"email": email, "pw_hash": _hash_password(password)}
+                    users[name] = {"pw_hash": _hash_password(password)}
                     _save_users(users)
                     mysend(sock, json.dumps({"action": "signup", "status": "ok"}))
                     return
                 if action == "forgot":
                     name = msg.get("name", "").strip()
-                    email = msg.get("email", "").strip()
-                    if not name or not email:
+                    if not name:
                         mysend(sock, json.dumps({"action": "forgot", "status": "missing-fields"}))
                         return
                     users = _load_users()
-                    if name not in users or users[name].get("email") != email:
+                    if name not in users:
                         mysend(sock, json.dumps({"action": "forgot", "status": "no-match"}))
                         return
                     import random, string
@@ -148,6 +154,11 @@ class Server:
                     if self.group.is_member(name) != True:
                         # move socket from new clients list to logged clients
                         self.new_clients.remove(sock)
+                        # ensure the socket is in blocking mode for myrecv
+                        try:
+                            sock.setblocking(1)
+                        except Exception:
+                            pass
                         # add into the name to sock mapping
                         self.logged_name2sock[name] = sock
                         self.logged_sock2name[sock] = name
@@ -237,34 +248,32 @@ class Server:
                         for g in the_guys[1:]:
                             to_sock = self.logged_name2sock.get(g)
                             if to_sock:
-                                mysend(to_sock, json.dumps({"action": "connect", "status": "request", "from": from_name}))
+                                self._safe_send(to_sock, json.dumps({"action": "connect", "status": "request", "from": from_name}))
                 else:
                     msg = json.dumps({"action": "connect", "status": "no-user"})
                 mysend(from_sock, msg)
             elif action == "signup":
-                # signup expects name, email, password
+                # signup expects name and password (email removed)
                 name = msg.get("name", "").strip()
-                email = msg.get("email", "").strip()
                 password = msg.get("password", "")
-                if not name or not email or not password:
+                if not name or not password:
                     mysend(from_sock, json.dumps({"action": "signup", "status": "missing-fields"}))
                     return
                 users = _load_users()
                 if name in users:
                     mysend(from_sock, json.dumps({"action": "signup", "status": "exists"}))
                     return
-                users[name] = {"email": email, "pw_hash": _hash_password(password)}
+                users[name] = {"pw_hash": _hash_password(password)}
                 _save_users(users)
                 mysend(from_sock, json.dumps({"action": "signup", "status": "ok"}))
             elif action == "forgot":
-                # forgot expects name and email, returns temp password
+                # forgot expects name only; returns temp password
                 name = msg.get("name", "").strip()
-                email = msg.get("email", "").strip()
-                if not name or not email:
+                if not name:
                     mysend(from_sock, json.dumps({"action": "forgot", "status": "missing-fields"}))
                     return
                 users = _load_users()
-                if name not in users or users[name].get("email") != email:
+                if name not in users:
                     mysend(from_sock, json.dumps({"action": "forgot", "status": "no-match"}))
                     return
                 # generate a temporary password (insecure but OK for demo)
@@ -304,19 +313,11 @@ class Server:
                 the_guys = self.group.list_me(from_name)[1:]
                 for g in the_guys:
                     to_sock = self.logged_name2sock[g]
-
-                    # IMPLEMENTATION
-                    # ---- start your code ---- #
-                    mysend(
-                        to_sock,
-                        json.dumps(
-                            {
-                                "action": "exchange",
-                                "from": display_from,
-                                "message": message
-                            }
-                        )
-                    )
+                    self._safe_send(to_sock, json.dumps({
+                        "action": "exchange",
+                        "from": display_from,
+                        "message": message
+                    }))
 
                     # ---- end of your code --- #
 
@@ -346,6 +347,7 @@ class Server:
                 # ---- end of your code --- #
                 mysend(from_sock, json.dumps(
                     {"action": "list", "results": msg}))
+            # file action removed
 # ==============================================================================
 #             retrieve a sonnet : IMPLEMENT THIS
 # ==============================================================================
@@ -391,287 +393,6 @@ class Server:
                 # ---- end of your code --- #
                 mysend(from_sock, json.dumps(
                     {"action": "search", "results": search_rslt}))
-            else:
-                self._send_error(from_sock, "unknown action")
-
-            # ==============================================================================
-            # Snake / Scoreboard (JSON protocol)
-            # ==============================================================================
-            elif action == "snake_leaderboard":
-                try:
-                    leaderboard = sb.get_leaderboard()
-                except Exception as e:
-                    leaderboard = f"Error building leaderboard: {e}"
-                mysend(from_sock, json.dumps({"action": "snake_leaderboard", "results": leaderboard}))
-
-            elif action == "snake_submit_score":
-                from_name = self.logged_sock2name[from_sock]
-                score = msg.get("score")
-                try:
-                    score_int = int(score)
-                except Exception:
-                    self._send_error(from_sock, "missing/invalid snake score")
-                    return
-
-                sb.update_score(from_name, score_int)
-                try:
-                    leaderboard = sb.get_leaderboard()
-                except Exception:
-                    leaderboard = ""
-                mysend(from_sock, json.dumps({
-                    "action": "snake_submit_score",
-                    "status": "ok",
-                    "score": score_int,
-                    "leaderboard": leaderboard
-                }))
-
-            # ==============================================================================
-            # Tic Tac Toe Multiplayer (JSON protocol)
-            # ==============================================================================
-            elif action == "ttt_invite":
-                inviter = self.logged_sock2name[from_sock]
-                target = msg.get("target", "").strip()
-                if not target or target == inviter:
-                    self._send_error(from_sock, "invalid ttt_invite target")
-                    return
-                if target not in self.logged_name2sock:
-                    self._send_error(from_sock, "target not online")
-                    return
-                if target in self.ttt_pending_challenges:
-                    self._send_error(from_sock, "target already has a pending challenge")
-                    return
-
-                game_id = uuid4().hex
-                self.ttt_pending_challenges[target] = {"from": inviter, "game_id": game_id}
-
-                # X = inviter, O = target
-                mysend(from_sock, json.dumps({
-                    "action": "ttt_invite",
-                    "status": "sent",
-                    "game_id": game_id,
-                    "to": target,
-                    "your_symbol": "X"
-                }))
-
-                target_sock = self.logged_name2sock[target]
-                mysend(target_sock, json.dumps({
-                    "action": "ttt_challenge",
-                    "game_id": game_id,
-                    "from": inviter,
-                    "your_symbol": "O",
-                }))
-
-            elif action == "ttt_decline":
-                decliner = self.logged_sock2name[from_sock]
-                game_id = msg.get("game_id")
-                if not isinstance(game_id, str) or not game_id:
-                    self._send_error(from_sock, "missing ttt_decline game_id")
-                    return
-
-                pending = self.ttt_pending_challenges.get(decliner)
-                if not pending or pending.get("game_id") != game_id:
-                    self._send_error(from_sock, "no such pending challenge for decline")
-                    return
-
-                inviter = pending.get("from")
-                # clear pending first
-                del self.ttt_pending_challenges[decliner]
-
-                inviter_sock = self.logged_name2sock.get(inviter)
-                if inviter_sock:
-                    mysend(inviter_sock, json.dumps({
-                        "action": "ttt_declined",
-                        "game_id": game_id,
-                        "from": inviter,
-                        "to": decliner,
-                        "reason": "declined"
-                    }))
-
-                mysend(from_sock, json.dumps({
-                    "action": "ttt_declined",
-                    "game_id": game_id,
-                    "status": "ok"
-                }))
-
-            elif action == "ttt_accept":
-                accepter = self.logged_sock2name[from_sock]
-                game_id = msg.get("game_id")
-                if not isinstance(game_id, str) or not game_id:
-                    self._send_error(from_sock, "missing ttt_accept game_id")
-                    return
-                pending = self.ttt_pending_challenges.get(accepter)
-                if not pending or pending.get("game_id") != game_id:
-                    self._send_error(from_sock, "no such pending challenge for accept")
-                    return
-
-                inviter = pending.get("from")
-                if inviter not in self.logged_name2sock:
-                    self._send_error(from_sock, "inviter not online anymore")
-                    return
-
-                # Create game state
-                game_state = {
-                    "game_id": game_id,
-                    "board": [""] * 9,
-                    "players": {"X": inviter, "O": accepter},
-                    "turn": "X",
-                    "winner": None,
-                    "draw": False,
-                    "status": "playing",
-                }
-                self.ttt_games[game_id] = game_state
-                self.ttt_player_to_game_id[inviter] = game_id
-                self.ttt_player_to_game_id[accepter] = game_id
-
-                # clear pending
-                del self.ttt_pending_challenges[accepter]
-
-                inviter_sock = self.logged_name2sock[inviter]
-                accepter_sock = self.logged_name2sock[accepter]
-
-                # Broadcast start/state
-                for player_name, sock in [(inviter, inviter_sock), (accepter, accepter_sock)]:
-                    symbol = "X" if player_name == inviter else "O"
-                    mysend(sock, json.dumps({
-                        "action": "ttt_start",
-                        "game_id": game_id,
-                        "board": game_state["board"],
-                        "players": game_state["players"],
-                        "turn": game_state["turn"],
-                        "winner": game_state["winner"],
-                        "draw": game_state["draw"],
-                        "status": game_state["status"],
-                        "your_symbol": symbol,
-                    }))
-
-            elif action == "ttt_move":
-                mover = self.logged_sock2name[from_sock]
-                game_id = msg.get("game_id")
-                index = msg.get("index")
-
-                if not isinstance(game_id, str) or not game_id:
-                    self._send_error(from_sock, "missing ttt_move game_id")
-                    return
-                if not isinstance(index, int):
-                    self._send_error(from_sock, "missing/invalid ttt_move index")
-                    return
-                if game_id not in self.ttt_games:
-                    self._send_error(from_sock, "unknown ttt game_id")
-                    return
-
-                game_state = self.ttt_games[game_id]
-                if game_state.get("status") != "playing":
-                    self._send_error(from_sock, "game is not active")
-                    return
-
-                players = game_state["players"]
-                your_symbol = None
-                if mover == players["X"]:
-                    your_symbol = "X"
-                elif mover == players["O"]:
-                    your_symbol = "O"
-                else:
-                    self._send_error(from_sock, "you are not part of this game")
-                    return
-
-                if your_symbol != game_state["turn"]:
-                    self._send_error(from_sock, "not your turn")
-                    return
-
-                if index < 0 or index > 8:
-                    self._send_error(from_sock, "index out of range")
-                    return
-
-                if game_state["board"][index] != "":
-                    self._send_error(from_sock, "cell already taken")
-                    return
-
-                # Apply move
-                game_state["board"][index] = your_symbol
-
-                wins = [
-                    (0, 1, 2), (3, 4, 5), (6, 7, 8),
-                    (0, 3, 6), (1, 4, 7), (2, 5, 8),
-                    (0, 4, 8), (2, 4, 6),
-                ]
-                winner = None
-                for a, b, c in wins:
-                    if game_state["board"][a] and game_state["board"][a] == game_state["board"][b] == game_state["board"][c]:
-                        winner = game_state["board"][a]
-                        break
-
-                if winner:
-                    game_state["winner"] = winner
-                    game_state["draw"] = False
-                    game_state["status"] = "finished"
-                else:
-                    if "" not in game_state["board"]:
-                        game_state["winner"] = None
-                        game_state["draw"] = True
-                        game_state["status"] = "finished"
-                    else:
-                        game_state["winner"] = None
-                        game_state["draw"] = False
-                        game_state["turn"] = "O" if game_state["turn"] == "X" else "X"
-
-                # Broadcast updated state
-                x_name = players["X"]
-                o_name = players["O"]
-                for player_name in [x_name, o_name]:
-                    if player_name not in self.logged_name2sock:
-                        continue
-                    sock = self.logged_name2sock[player_name]
-                    symbol = "X" if player_name == x_name else "O"
-                    mysend(sock, json.dumps({
-                        "action": "ttt_state",
-                        "game_id": game_id,
-                        "board": game_state["board"],
-                        "players": game_state["players"],
-                        "turn": game_state.get("turn", None),
-                        "winner": game_state["winner"],
-                        "draw": game_state["draw"],
-                        "status": game_state["status"],
-                        "your_symbol": symbol,
-                    }))
-
-                if game_state["status"] == "finished":
-                    # remove from active mapping after broadcasting
-                    for nm in [x_name, o_name]:
-                        if nm in self.ttt_player_to_game_id and self.ttt_player_to_game_id[nm] == game_id:
-                            del self.ttt_player_to_game_id[nm]
-                    # keep game state in self.ttt_games for now (optional)
-
-            elif action == "ttt_leave":
-                leaver = self.logged_sock2name[from_sock]
-                game_id = msg.get("game_id")
-                if not isinstance(game_id, str) or not game_id:
-                    self._send_error(from_sock, "missing/invalid ttt_leave game_id")
-                    return
-                if game_id not in self.ttt_games:
-                    self._send_error(from_sock, "unknown ttt game_id")
-                    return
-
-                game_state = self.ttt_games[game_id]
-                if leaver not in [game_state["players"]["X"], game_state["players"]["O"]]:
-                    self._send_error(from_sock, "you are not part of this game")
-                    return
-
-                other = game_state["players"]["O"] if leaver == game_state["players"]["X"] else game_state["players"]["X"]
-                other_sock = self.logged_name2sock.get(other)
-                if other_sock:
-                    mysend(other_sock, json.dumps({
-                        "action": "ttt_abort",
-                        "game_id": game_id,
-                        "reason": "opponent_left"
-                    }))
-
-                # cleanup mapping
-                for nm in [game_state["players"]["X"], game_state["players"]["O"]]:
-                    if nm in self.ttt_player_to_game_id and self.ttt_player_to_game_id[nm] == game_id:
-                        del self.ttt_player_to_game_id[nm]
-                if game_id in self.ttt_games:
-                    del self.ttt_games[game_id]
-
             else:
                 self._send_error(from_sock, "unknown action")
 
