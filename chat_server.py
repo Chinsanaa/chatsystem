@@ -12,28 +12,6 @@ import json
 import pickle as pkl
 from chat_utils import *
 import chat_group as grp
-import os
-import hashlib
-
-
-# Simple user database (JSON) helpers
-USERS_FILE = 'users.json'
-
-def _load_users():
-    if not os.path.exists(USERS_FILE):
-        return {}
-    try:
-        with open(USERS_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except Exception:
-        return {}
-
-def _save_users(users):
-    with open(USERS_FILE, 'w', encoding='utf-8') as f:
-        json.dump(users, f, indent=2)
-
-def _hash_password(pw: str) -> str:
-    return hashlib.sha256(pw.encode('utf-8')).hexdigest()
 
 
 class Server:
@@ -137,20 +115,7 @@ class Server:
                     return
 
                 if msg["action"] == "login":
-                    # require name and password; only allow existing accounts
-                    name = msg.get("name", "").strip()
-                    password = msg.get("password", "")
-                    users = _load_users()
-                    # require an existing account
-                    if name not in users:
-                        mysend(sock, json.dumps({"action": "login", "status": "no-account"}))
-                        return
-                    # check password match
-                    stored = users[name]
-                    if _hash_password(password) != stored.get("pw_hash"):
-                        mysend(sock, json.dumps({"action": "login", "status": "bad-password"}))
-                        return
-                    # continue with original duplicate/login logic
+                    name = msg["name"]
                     if self.group.is_member(name) != True:
                         # move socket from new clients list to logged clients
                         self.new_clients.remove(sock)
@@ -234,23 +199,23 @@ class Server:
                 from_name = self.logged_sock2name[from_sock]
                 if to_name == from_name:
                     msg = json.dumps({"action": "connect", "status": "self"})
-                # connect to the peer: check actual logged-in users first
-                elif to_name in self.logged_name2sock:
-                    # if the peer is already talking, mark busy
+                # connect to the peer
+                elif self.group.is_member(to_name):
                     if self.group.members.get(to_name) == grp.S_TALKING:
-                        msg = json.dumps({"action": "connect", "status": "busy"})
+                        msg = json.dumps(
+                            {"action": "connect", "status": "busy"})
                     else:
-                        # create or join group
                         self.group.connect(from_name, to_name)
                         the_guys = self.group.list_me(from_name)
-                        msg = json.dumps({"action": "connect", "status": "success"})
-                        # notify other members (the_guys[1:]) with a request
+                        msg = json.dumps(
+                            {"action": "connect", "status": "success"})
                         for g in the_guys[1:]:
                             to_sock = self.logged_name2sock.get(g)
                             if to_sock:
                                 self._safe_send(to_sock, json.dumps({"action": "connect", "status": "request", "from": from_name}))
                 else:
-                    msg = json.dumps({"action": "connect", "status": "no-user"})
+                    msg = json.dumps(
+                        {"action": "connect", "status": "no-user"})
                 mysend(from_sock, msg)
             elif action == "signup":
                 # signup expects name and password (email removed)
