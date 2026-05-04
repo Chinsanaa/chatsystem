@@ -1,67 +1,77 @@
 """
 chat_gui.py - Tkinter GUI for the ICS Chat System
-Wraps chat_client_class.py and client_state_machine.py without modifying them.
 
 Author: Sanaa
 """
 
 import tkinter as tk
-from tkinter import scrolledtext, font as tkfont
+from tkinter import scrolledtext
 import threading
-import time
 import socket
 import json
 import argparse
+from tkinter import simpledialog
 
 from chat_utils import *
-import client_state_machine as csm
 from chat_bot_client import ChatBotClient
 from sentiment import get_sentiment
 
+from snake import SnakeGame
+from tictactoe import TicTacToeMultiplayerWindow
 
 # ==============================================================================
-# Color palette and style constants
+# Friendly command reference (replaces raw terminal menu string)
 # ==============================================================================
-BG_DARK     = "#1a1a2e"   # deep navy background
-BG_MID      = "#16213e"   # slightly lighter panel
-BG_INPUT    = "#0f3460"   # input area
-ACCENT      = "#e94560"   # red-pink accent
-ACCENT2     = "#533483"   # purple accent
-TEXT_MAIN   = "#eaeaea"   # primary text
-TEXT_DIM    = "#8892a4"   # dimmed/system text
-BUBBLE_ME   = "#0f3460"   # sent message bubble
-BUBBLE_PEER = "#1a1a2e"   # received message bubble
-BUBBLE_SYS  = "#533483"   # system message bubble
-ONLINE_DOT  = "#4ecca3"   # green online indicator
-
+FRIENDLY_MENU = """
+--- Available Commands ---
+  chat <username>    Connect to a user        (e.g.  chat alice)
+  who                See who is online
+  time               Show current date/time
+  bye                Leave current chat
+  ? <word>           Search chat history      (e.g.  ? hello)
+  p <number>         Get a Shakespeare sonnet (e.g.  p 18)
+  q                  Quit the app
+--------------------------
+"""
 
 # ==============================================================================
-# GUIClient: replaces the terminal-based Client class with a Tkinter GUI
+# Color palette
+# ==============================================================================
+BG_DARK    = "#1a1a2e"
+BG_MID     = "#16213e"
+BG_INPUT   = "#0f3460"
+ACCENT     = "#e94560"
+ACCENT2    = "#533483"
+TEXT_MAIN  = "#eaeaea"
+TEXT_DIM   = "#8892a4"
+ONLINE_DOT = "#4ecca3"
+
+# ==============================================================================
+# GUIClient
 # ==============================================================================
 class GUIClient:
     def __init__(self, args):
-        self.args = args
-        self.name = ""
-        self.state = S_OFFLINE
-        self.sm = None
-        self.socket = None
+        self.args    = args
+        self.name    = ""
+        self.state   = S_OFFLINE
+        self.socket  = None
 
-        # Chatbot state
-        self.bot = ChatBotClient(personality="friendly")
-        self.bot_mode = False           # True when user is in 1-on-1 bot chat
-        self.bot_thinking = False       # prevents double sends while phi3 is busy
+        # Game windows (single-instance per client)
+        self.snake_window = None
+        self.ttt_window = None
 
-        # Sentiment analysis toggle
-        self.sentiment_on = True        # can be toggled by user
+        self.bot          = ChatBotClient(personality="friendly")
+        self.bot_mode     = False
+        self.bot_thinking = False
+        self.sentiment_on = True
 
-        # Build the main window
         self.root = tk.Tk()
         self.root.title("ICS Chat")
-        self.root.geometry("780x620")
+        self.root.geometry("780x640")
         self.root.configure(bg=BG_DARK)
         self.root.resizable(False, False)
+        self.root.protocol("WM_DELETE_WINDOW", self._cleanup_and_quit)
 
-        # Show login screen first
         self.build_login_screen()
         self.root.mainloop()
 
@@ -69,26 +79,15 @@ class GUIClient:
     # LOGIN SCREEN
     # ==========================================================================
     def build_login_screen(self):
-        """Full-window login panel shown before main chat."""
         self.login_frame = tk.Frame(self.root, bg=BG_DARK)
         self.login_frame.place(relx=0.5, rely=0.5, anchor="center")
 
-        # Title
-        tk.Label(
-            self.login_frame, text="ICS", bg=BG_DARK,
-            fg=ACCENT, font=("Courier New", 48, "bold")
-        ).pack(pady=(0, 0))
-
-        tk.Label(
-            self.login_frame, text="CHAT SYSTEM", bg=BG_DARK,
-            fg=TEXT_DIM, font=("Courier New", 12, "bold"), letter_spacing=8
-        ).pack(pady=(0, 30))
-
-        # Username field
-        tk.Label(
-            self.login_frame, text="USERNAME", bg=BG_DARK,
-            fg=TEXT_DIM, font=("Courier New", 9)
-        ).pack(anchor="w")
+        tk.Label(self.login_frame, text="ICS", bg=BG_DARK,
+                 fg=ACCENT, font=("Courier New", 48, "bold")).pack()
+        tk.Label(self.login_frame, text="C H A T   S Y S T E M", bg=BG_DARK,
+                 fg=TEXT_DIM, font=("Courier New", 12, "bold")).pack(pady=(0, 30))
+        tk.Label(self.login_frame, text="USERNAME", bg=BG_DARK,
+                 fg=TEXT_DIM, font=("Courier New", 9)).pack(anchor="w")
 
         self.name_entry = tk.Entry(
             self.login_frame, width=28, bg=BG_INPUT, fg=TEXT_MAIN,
@@ -99,14 +98,10 @@ class GUIClient:
         self.name_entry.focus()
         self.name_entry.bind("<Return>", lambda e: self.attempt_login())
 
-        # Status label (shows errors)
-        self.login_status = tk.Label(
-            self.login_frame, text="", bg=BG_DARK,
-            fg=ACCENT, font=("Courier New", 9)
-        )
+        self.login_status = tk.Label(self.login_frame, text="", bg=BG_DARK,
+                                     fg=ACCENT, font=("Courier New", 9))
         self.login_status.pack(pady=(0, 10))
 
-        # Connect button
         tk.Button(
             self.login_frame, text="CONNECT", command=self.attempt_login,
             bg=ACCENT, fg="white", font=("Courier New", 11, "bold"),
@@ -116,7 +111,6 @@ class GUIClient:
         ).pack()
 
     def attempt_login(self):
-        """Try to connect to the server and log in."""
         name = self.name_entry.get().strip()
         if not name:
             self.login_status.config(text="Please enter a username.")
@@ -133,7 +127,6 @@ class GUIClient:
             self.login_status.config(text="Cannot reach server. Is it running?")
             return
 
-        # Send login message
         mysend(self.socket, json.dumps({"action": "login", "name": name}))
         try:
             response = json.loads(myrecv(self.socket))
@@ -142,11 +135,8 @@ class GUIClient:
             return
 
         if response["status"] == "ok":
-            self.name = name
+            self.name  = name
             self.state = S_LOGGEDIN
-            self.sm = csm.ClientSM(self.socket)
-            self.sm.set_state(S_LOGGEDIN)
-            self.sm.set_myname(self.name)
             self.login_frame.destroy()
             self.build_chat_screen()
             self.start_recv_thread()
@@ -156,122 +146,111 @@ class GUIClient:
             self.login_status.config(text="Login failed.")
 
     # ==========================================================================
-    # MAIN CHAT SCREEN
+    # CHAT SCREEN
     # ==========================================================================
     def build_chat_screen(self):
-        """Build the full chat UI after successful login."""
-        self.root.title(f"ICS Chat  —  {self.name}")
+        self.root.title(f"ICS Chat  -  {self.name}")
 
-        # ---- Top header bar ----
+        # Header bar
         header = tk.Frame(self.root, bg=BG_MID, height=54)
         header.pack(fill="x", side="top")
         header.pack_propagate(False)
 
-        tk.Label(
-            header, text="●", fg=ONLINE_DOT, bg=BG_MID,
-            font=("Courier New", 14)
-        ).pack(side="left", padx=(16, 6), pady=14)
+        tk.Label(header, text="●", fg=ONLINE_DOT, bg=BG_MID,
+                 font=("Courier New", 14)).pack(side="left", padx=(16, 6), pady=14)
+        tk.Label(header, text=f"Logged in as  {self.name}",
+                 fg=TEXT_MAIN, bg=BG_MID,
+                 font=("Courier New", 11, "bold")).pack(side="left", pady=14)
+        tk.Label(header, text="ICS CHAT", fg=ACCENT, bg=BG_MID,
+                 font=("Courier New", 13, "bold")).pack(side="right", padx=20, pady=14)
 
-        tk.Label(
-            header, text=f"Logged in as  {self.name}",
-            fg=TEXT_MAIN, bg=BG_MID, font=("Courier New", 11, "bold")
-        ).pack(side="left", pady=14)
-
-        tk.Label(
-            header, text="ICS CHAT", fg=ACCENT,
-            bg=BG_MID, font=("Courier New", 13, "bold")
-        ).pack(side="right", padx=20, pady=14)
-
-        # ---- Quick command buttons ----
+        # Button bar
         btn_bar = tk.Frame(self.root, bg=BG_MID, height=38)
         btn_bar.pack(fill="x")
         btn_bar.pack_propagate(False)
 
-        cmds = [
-            ("WHO",      lambda: self.send_command("who")),
-            ("TIME",     lambda: self.send_command("time")),
-            ("HELP",     lambda: self.append_msg("system", menu)),
-            ("BOT CHAT", self.toggle_bot_mode),
-            ("SENTIMENT", self.toggle_sentiment),
-        ]
-        for label, cmd in cmds:
+        def _btn(label, cmd, fg="white"):
             tk.Button(
                 btn_bar, text=label, command=cmd,
-                bg=ACCENT2, fg="white", font=("Courier New", 8, "bold"),
+                bg=ACCENT2, fg=fg, font=("Courier New", 8, "bold"),
                 relief="flat", cursor="hand2", bd=0,
                 activebackground=ACCENT, activeforeground="white",
                 padx=12, pady=4
             ).pack(side="left", padx=4, pady=5)
 
-        # Disconnect button on right
+        _btn("WHO",      lambda: self.send_command("who"))
+        _btn("TIME",     lambda: self.send_command("time"))
+        _btn("HELP",     lambda: self.append_msg("system", FRIENDLY_MENU))
+        _btn("BOT CHAT", self.toggle_bot_mode)
+
+        # Games
+        _btn("SNAKE", lambda: self.open_snake_window())
+        _btn("SNAKE LB", lambda: self.request_snake_leaderboard())
+        _btn("TICTACTOE", lambda: self.invite_tictactoe())
+
+        self.sentiment_btn = tk.Button(
+            btn_bar, text="SENTIMENT: ON", command=self.toggle_sentiment,
+            bg=ACCENT2, fg=ONLINE_DOT, font=("Courier New", 8, "bold"),
+            relief="flat", cursor="hand2", bd=0,
+            activebackground=ACCENT, activeforeground="white",
+            padx=12, pady=4
+        )
+        self.sentiment_btn.pack(side="left", padx=4, pady=5)
+
         tk.Button(
-            btn_bar, text="DISCONNECT", command=lambda: self.send_command("bye"),
+            btn_bar, text="DISCONNECT", command=self.disconnect_from_peer,
             bg=BG_DARK, fg=ACCENT, font=("Courier New", 8, "bold"),
             relief="flat", cursor="hand2", bd=0,
             activebackground=ACCENT, activeforeground="white",
             padx=12, pady=4
         ).pack(side="right", padx=8, pady=5)
 
-        # ---- Message display area ----
-        self.chat_area = scrolledtext.ScrolledText(
-            self.root, state="disabled", wrap="word",
-            bg=BG_DARK, fg=TEXT_MAIN,
-            font=("Courier New", 11),
-            relief="flat", bd=0,
-            padx=16, pady=12,
-            spacing3=6
-        )
-        self.chat_area.pack(fill="both", expand=True, padx=0, pady=0)
-
-        # Configure text tags for bubble styling
-        self.chat_area.tag_config(
-            "me", foreground=ACCENT,
-            font=("Courier New", 11, "bold"),
-            lmargin1=80, lmargin2=80,
-            rmargin=10
-        )
-        self.chat_area.tag_config(
-            "peer", foreground=ONLINE_DOT,
-            font=("Courier New", 11),
-            lmargin1=10, lmargin2=10
-        )
-        self.chat_area.tag_config(
-            "system", foreground=TEXT_DIM,
-            font=("Courier New", 10, "italic"),
-            lmargin1=10, lmargin2=10
-        )
-        self.chat_area.tag_config(
-            "error", foreground=ACCENT,
-            font=("Courier New", 10, "italic"),
-            lmargin1=10
-        )
-        self.chat_area.tag_config(
-            "bot", foreground="#f5a623",
-            font=("Courier New", 11, "bold"),
-            lmargin1=10, lmargin2=10
-        )
-        # Sentiment tags — small inline labels shown after each sent message
-        self.chat_area.tag_config(
-            "positive", foreground="#4ecca3",
-            font=("Courier New", 9)
-        )
-        self.chat_area.tag_config(
-            "negative", foreground=ACCENT,
-            font=("Courier New", 9)
-        )
-        self.chat_area.tag_config(
-            "neutral", foreground=TEXT_DIM,
-            font=("Courier New", 9)
-        )
-
-        # ---- Bot personality bar (hidden until bot mode is on) ----
-        self.bot_bar = tk.Frame(self.root, bg=ACCENT2, height=34)
-        # not packed yet — shown only when bot mode is active
+        # Input area (packed early to guarantee visibility at the bottom)
+        input_frame = tk.Frame(self.root, bg="#1e2a40", pady=10)
+        input_frame.pack(fill="x", side="bottom")
 
         tk.Label(
-            self.bot_bar, text="BOT PERSONALITY:", bg=ACCENT2,
-            fg=TEXT_MAIN, font=("Courier New", 8)
-        ).pack(side="left", padx=(10, 4), pady=7)
+            input_frame,
+            text="Type a message or command  (e.g. /chat alice | /who | /time | /bye | /p 18)",
+            bg="#1e2a40", fg=TEXT_DIM, font=("Courier New", 8)
+        ).pack(anchor="w", padx=16, pady=(0, 4))
+
+        input_row = tk.Frame(input_frame, bg="#1e2a40")
+        input_row.pack(fill="x", padx=12, pady=(0, 6))
+
+        # Use Entry for a clearly visible single-line composer across platforms.
+        self.input_var = tk.StringVar()
+        self.input_box = tk.Entry(
+            input_row,
+            textvariable=self.input_var,
+            bg="#ffffff",
+            fg="#111111",
+            insertbackground="#111111",
+            font=("Courier New", 13),
+            relief="solid",
+            bd=1
+        )
+        self.input_box.pack(side="left", fill="x", expand=True, ipady=7)
+        self.input_box.bind("<Return>", self._on_input_enter)
+        self.input_box.bind("<KP_Enter>", self._on_input_enter)
+
+        tk.Button(
+            input_row, text="SEND", command=self.send_message,
+            bg=ACCENT, fg="white", font=("Courier New", 11, "bold"),
+            relief="flat", cursor="hand2", bd=0,
+            activebackground=ACCENT2, activeforeground="white",
+            padx=24, pady=8
+        ).pack(side="left", padx=(10, 0))
+
+        # Middle frame: bot_bar (hidden) stacked above chat_area
+        self.middle_frame = tk.Frame(self.root, bg=BG_DARK)
+        self.middle_frame.pack(fill="both", expand=True)
+
+        # Bot bar — created but not packed until bot mode ON
+        self.bot_bar = tk.Frame(self.middle_frame, bg=ACCENT2, height=34)
+
+        tk.Label(self.bot_bar, text="BOT PERSONALITY:", bg=ACCENT2,
+                 fg=TEXT_MAIN, font=("Courier New", 8)).pack(side="left", padx=(10, 4), pady=7)
 
         self.personality_var = tk.StringVar(value="friendly")
         for p in self.bot.list_personalities():
@@ -286,213 +265,522 @@ class GUIClient:
         tk.Button(
             self.bot_bar, text="CLEAR HISTORY", command=self.clear_bot_history,
             bg=BG_DARK, fg=TEXT_DIM, font=("Courier New", 8),
-            relief="flat", cursor="hand2", bd=0,
-            padx=8
+            relief="flat", cursor="hand2", bd=0, padx=8
         ).pack(side="right", padx=10)
 
-        # ---- Bottom input area ----
-        input_frame = tk.Frame(self.root, bg=BG_INPUT, height=60)
-        input_frame.pack(fill="x", side="bottom")
-        input_frame.pack_propagate(False)
-
-        self.input_var = tk.StringVar()
-        self.input_box = tk.Entry(
-            input_frame, textvariable=self.input_var,
-            bg=BG_INPUT, fg=TEXT_MAIN,
-            insertbackground=ACCENT,
-            font=("Courier New", 12),
-            relief="flat", bd=0
+        # Chat display
+        self.chat_area = scrolledtext.ScrolledText(
+            self.middle_frame, state="normal", wrap="word",
+            bg=BG_DARK, fg=TEXT_MAIN,
+            font=("Courier New", 11),
+            relief="flat", bd=0,
+            padx=16, pady=12, spacing3=6
         )
-        self.input_box.pack(side="left", fill="both", expand=True, padx=16, pady=18)
-        self.input_box.bind("<Return>", lambda e: self.send_message())
+        self.chat_area.pack(fill="both", expand=True)
 
-        tk.Button(
-            input_frame, text="SEND", command=self.send_message,
-            bg=ACCENT, fg="white",
-            font=("Courier New", 10, "bold"),
-            relief="flat", cursor="hand2", bd=0,
-            activebackground=ACCENT2, activeforeground="white",
-            padx=20
-        ).pack(side="right", padx=10, pady=12)
+        # Read-only: block keypresses, redirect clicks back to input box
+        self.chat_area.bind("<Key>", lambda e: "break")
+        self.chat_area.bind("<Button-1>",
+                            lambda e: self.root.after_idle(self._refocus_input))
 
-        # Welcome message
-        self.append_msg("system", f"Welcome, {self.name}! You are logged in.\n")
-        self.append_msg("system", menu)
+        # Text tags
+        self.chat_area.tag_config("me",
+            foreground=ACCENT, font=("Courier New", 11, "bold"),
+            lmargin1=80, lmargin2=80, rmargin=10)
+        self.chat_area.tag_config("peer",
+            foreground=ONLINE_DOT, font=("Courier New", 11),
+            lmargin1=10, lmargin2=10)
+        self.chat_area.tag_config("system",
+            foreground=TEXT_DIM, font=("Courier New", 10, "italic"),
+            lmargin1=10, lmargin2=10)
+        self.chat_area.tag_config("error",
+            foreground=ACCENT, font=("Courier New", 10, "italic"),
+            lmargin1=10)
+        self.chat_area.tag_config("bot",
+            foreground="#f5a623", font=("Courier New", 11, "bold"),
+            lmargin1=10, lmargin2=10)
+        self.chat_area.tag_config("positive",
+            foreground=ONLINE_DOT, font=("Courier New", 9))
+        self.chat_area.tag_config("negative",
+            foreground=ACCENT, font=("Courier New", 9))
+        self.chat_area.tag_config("neutral",
+            foreground=TEXT_DIM, font=("Courier New", 9))
+
+        self._refocus_input()
+        self.append_msg("system", f"Welcome, {self.name}! You are logged in.")
+        self.append_msg("system", FRIENDLY_MENU)
+
+    def _refocus_input(self):
+        """Safe focus redirect — guards against input_box not existing yet."""
+        try:
+            self.input_box.focus_force()
+        except AttributeError:
+            pass
 
     # ==========================================================================
-    # MESSAGING
+    # SEND PATH
     # ==========================================================================
-    def append_msg(self, tag, text):
-        """Thread-safe message display. tag: 'me', 'peer', 'system', 'error'"""
-        def _insert():
-            self.chat_area.config(state="normal")
-            self.chat_area.insert("end", text + "\n", tag)
-            self.chat_area.config(state="disabled")
-            self.chat_area.see("end")
-        self.root.after(0, _insert)
-
     def send_message(self):
-        """Read input box, route to bot or server depending on mode."""
+        """Called by Enter key or SEND button."""
         text = self.input_var.get().strip()
         if not text:
             return
         self.input_var.set("")
+        self._refocus_input()
+        self._send_text(text)
 
-        # ---- Bot mode: 1-on-1 chat with bot (no server involvement) ----
+    def _on_input_enter(self, _event):
+        """Unified Enter handler for both main and numpad Enter keys."""
+        self.send_message()
+        return "break"
+
+    def send_command(self, cmd):
+        """Called by quick-command buttons (WHO, TIME, etc.)."""
+        payload = self._parse_system_command(cmd)
+        try:
+            if payload:
+                mysend(self.socket, json.dumps(payload))
+            else:
+                self._send_text(cmd)
+        except Exception as e:
+            self.append_msg("error", f"[command error: {e}]")
+        self._refocus_input()
+
+    def _translate_command(self, text):
+        """Map friendly words to what ClientSM.proc() understands."""
+        low = text.strip().lower()
+        if low.startswith("chat "):
+            return "c " + text.strip()[5:]
+        if low.startswith("connect "):
+            return "c " + text.strip()[8:]
+        return text
+
+    def _parse_system_command(self, text):
+        """
+        Parse command text into a server action payload.
+        Supports both slash and non-slash forms:
+          /time, /who, /chat bob, /? hello, /p 18, /bye
+          time, who, chat bob, ? hello, p 18, bye
+        Returns dict payload or None.
+        """
+        cmd = text.strip()
+        if not cmd:
+            return None
+        if cmd.startswith("/"):
+            cmd = cmd[1:].strip()
+        low = cmd.lower()
+
+        if low == "time":
+            return {"action": "time"}
+        if low == "who":
+            return {"action": "list"}
+        if low.startswith("chat "):
+            peer = cmd[5:].strip()
+            return {"action": "connect", "target": peer} if peer else None
+        if low.startswith("connect "):
+            peer = cmd[8:].strip()
+            return {"action": "connect", "target": peer} if peer else None
+        if low == "bye":
+            return {"action": "disconnect"}
+        if cmd.startswith("?"):
+            term = cmd[1:].strip()
+            return {"action": "search", "target": term} if term else None
+        if low.startswith("p "):
+            poem_idx = cmd[2:].strip()
+            if poem_idx.isdigit():
+                return {"action": "poem", "target": poem_idx}
+        return None
+
+    def _send_text(self, text):
+        """Core send logic — always runs on the main GUI thread."""
+        if not text:
+            return
+        if self.socket is None:
+            self.append_msg("error", "Not connected. Please log in first.")
+            return
+        payload = self._parse_system_command(text)
+
+        # q/quit -> clean shutdown
+        if text.strip().lower() in ("q", "/q", "quit", "/quit"):
+            self._cleanup_and_quit()
+            return
+
+        # Bot mode: messages go to phi3, not server
         if self.bot_mode:
             if text.lower() == "exit bot":
                 self.toggle_bot_mode()
                 return
             self.append_msg("me", f"[{self.name}]: {text}")
-            self.append_msg("bot", "Bot is thinking...")
-            threading.Thread(
-                target=self._get_bot_reply, args=(text,), daemon=True
-            ).start()
+            def _thinking():
+                self.chat_area.insert("end", "Bot is thinking...\n",
+                                      ("bot", "bot_thinking"))
+                self.chat_area.see("end")
+            self.root.after(0, _thinking)
+            threading.Thread(target=self._get_bot_reply,
+                             args=(text,), daemon=True).start()
             return
 
-        # ---- Normal chat mode ----
+        # Show outgoing message bubble only while chatting
         if self.state == S_CHATTING:
+            if payload and payload.get("action") == "disconnect":
+                try:
+                    mysend(self.socket, json.dumps(payload))
+                    self.append_msg("system", "You left the chat.")
+                except Exception as e:
+                    self.append_msg("error", f"[send error: {e}]")
+                self.state = S_LOGGEDIN
+                self.append_msg("system", FRIENDLY_MENU)
+                return
+
+            # Allow system commands while chatting (slash or legacy style).
+            if payload and payload.get("action") != "connect":
+                try:
+                    mysend(self.socket, json.dumps(payload))
+                except Exception as e:
+                    self.append_msg("error", f"[command error: {e}]")
+                return
+
             self.append_msg("me", f"[{self.name}]: {text}")
-            # Sentiment tag shown inline after the message
             if self.sentiment_on:
-                tag, label = get_sentiment(text)
-                if label:
-                    self.append_sentiment(tag, label)
+                stag, slabel = get_sentiment(text)
+                if slabel:
+                    self.append_sentiment(stag, slabel)
+            try:
+                mysend(self.socket, json.dumps(
+                    {"action": "exchange", "from": f"[{self.name}]", "message": text}))
+            except Exception as e:
+                self.append_msg("error", f"[send error: {e}]")
+            return
 
-        out = self.sm.proc(text, "")
-        self.state = self.sm.get_state()
-        if out:
-            self.append_msg("system", out)
+        # Logged-in command handling (non-chatting state)
+        cmd_text = self._translate_command(text).strip()
+        low = cmd_text.lower()
+        if not payload:
+            payload = self._parse_system_command(cmd_text)
 
-    def _get_bot_reply(self, text):
-        """Run phi3 in background thread, then update GUI safely."""
-        reply = self.bot.chat(text, sender_name=self.name)
-        def _show():
-            # Remove the "thinking..." line and show real reply
-            self.chat_area.config(state="normal")
-            self.chat_area.delete("end-2l", "end-1l")
-            self.chat_area.config(state="disabled")
-            self.append_msg("bot", f"[Bot ({self.bot.get_personality()})]: {reply}")
-        self.root.after(0, _show)
+        try:
+            if payload:
+                mysend(self.socket, json.dumps(payload))
+            elif low == "bye":
+                # Not in chat currently; keep behavior user-friendly.
+                self.append_msg("system", "You are not in a chat.")
+            else:
+                self.append_msg("system",
+                    "You are not in a chat yet. Use  chat <username>  first.")
+                self.append_msg("system", FRIENDLY_MENU)
+        except Exception as e:
+            self.append_msg("error", f"[command error: {e}]")
 
-    def send_command(self, cmd):
-        """Send a quick command from the button bar."""
-        self.input_var.set(cmd)
-        self.send_message()
+    def _server_send_json(self, payload: dict):
+        """Send a JSON action to the server over the already-established chat socket."""
+        if not self.socket:
+            return
+        mysend(self.socket, json.dumps(payload))
+
+    def request_snake_leaderboard(self):
+        self.append_msg("system", "Requesting snake leaderboard...")
+        try:
+            self._server_send_json({"action": "snake_leaderboard"})
+        except Exception as e:
+            self.append_msg("error", f"[snake leaderboard error: {e}]")
+
+    def open_snake_window(self):
+        # Create one Toplevel window per client.
+        try:
+            if self.snake_window is not None and self.snake_window.winfo_exists():
+                self.snake_window.lift()
+                return
+        except Exception:
+            pass
+
+        win = tk.Toplevel(self.root)
+        win.title("Snake")
+        self.snake_window = SnakeGame(
+            win,
+            username=self.name,
+            client_socket=self.socket,
+            send_json=self._server_send_json,
+        )
+
+    def invite_tictactoe(self):
+        peer = simpledialog.askstring("Tic Tac Toe", "Opponent username:")
+        if not peer:
+            return
+
+        try:
+            if self.ttt_window is not None and self.ttt_window.window.winfo_exists():
+                self.ttt_window.window.lift()
+            else:
+                self.ttt_window = TicTacToeMultiplayerWindow(
+                    self.root,
+                    title_prefix="Multiplayer",
+                    username=self.name,
+                    send_json=self._server_send_json,
+                )
+        except Exception:
+            self.ttt_window = TicTacToeMultiplayerWindow(
+                self.root,
+                title_prefix="Multiplayer",
+                username=self.name,
+                send_json=self._server_send_json,
+            )
+
+        # Invite opponent (server will start game after accept)
+        try:
+            self._server_send_json({"action": "ttt_invite", "target": peer})
+            self.append_msg("system", f"TicTacToe invite sent to {peer}.")
+        except Exception as e:
+            self.append_msg("error", f"[ttt invite error: {e}]")
+
+    def disconnect_from_peer(self):
+        """DISCONNECT button — only valid while in S_CHATTING."""
+        if self.state != S_CHATTING:
+            self.append_msg("system",
+                "You are not in a chat. Use  chat <username>  to connect.")
+            return
+        self._send_text("bye")
 
     # ==========================================================================
-    # RECEIVING MESSAGES (background thread)
+    # RECEIVE PATH (background thread)
     # ==========================================================================
     def start_recv_thread(self):
-        """Background thread: polls server for incoming messages."""
-        t = threading.Thread(target=self.recv_loop, daemon=True)
-        t.start()
+        threading.Thread(target=self.recv_loop, daemon=True).start()
 
     def recv_loop(self):
-        """Continuously receive from server, feed into state machine."""
-        import select
+        """Poll socket for server messages. Runs in background thread."""
+        import select as sel
         while self.state != S_OFFLINE:
             try:
-                read, _, _ = select.select([self.socket], [], [], 0.2)
-                if self.socket in read:
-                    peer_msg = myrecv(self.socket)
-                    if peer_msg:
-                        # Parse to check if it's a chat exchange (show in peer bubble)
-                        try:
-                            parsed = json.loads(peer_msg)
-                            if parsed.get("action") == "exchange":
-                                sender = parsed.get("from", "peer")
-                                message = parsed.get("message", "")
-                                self.append_msg("peer", f"{sender}: {message}")
+                read, _, _ = sel.select([self.socket], [], [], 0.2)
+                if self.socket not in read:
+                    continue
 
-                                # Group chat @bot detection (bonus feature)
-                                if self.bot.should_respond(message):
-                                    clean = self.bot.extract_message(message)
-                                    threading.Thread(
-                                        target=self._broadcast_bot_reply,
-                                        args=(clean, sender),
-                                        daemon=True
-                                    ).start()
-                            else:
-                                # For connect/disconnect/list/etc, let SM handle it
-                                out = self.sm.proc("", peer_msg)
-                                self.state = self.sm.get_state()
-                                if out:
-                                    self.append_msg("system", out)
-                        except Exception:
-                            out = self.sm.proc("", peer_msg)
-                            self.state = self.sm.get_state()
-                            if out:
-                                self.append_msg("system", out)
-            except Exception:
+                peer_msg = myrecv(self.socket)
+                if not peer_msg:
+                    break  # server closed connection
+
+                try:
+                    parsed = json.loads(peer_msg)
+                except json.JSONDecodeError:
+                    self.append_msg("error", f"[bad server message: {peer_msg}]")
+                    continue
+
+                action = parsed.get("action", "")
+
+                if action == "exchange":
+                    # Incoming chat message — display directly, no SM needed
+                    sender  = parsed.get("from", "peer")
+                    message = parsed.get("message", "")
+                    self.append_msg("peer", f"{sender}: {message}")
+                    if self.bot.should_respond(message):
+                        clean = self.bot.extract_message(message)
+                        threading.Thread(target=self._broadcast_bot_reply,
+                                         args=(clean, sender), daemon=True).start()
+
+                elif action == "disconnect":
+                    # Peer left the chat
+                    msg = parsed.get("msg", "Your chat partner disconnected.")
+                    self.append_msg("system", msg)
+                    self.state = S_LOGGEDIN
+                    self.append_msg("system", FRIENDLY_MENU)
+
+                elif action == "connect":
+                    status = parsed.get("status", "")
+                    if status == "request":
+                        requester = parsed.get("from", "unknown")
+                        self.state = S_CHATTING
+                        self.append_msg("system", f"You are connected with {requester}")
+                        self.append_msg("system", f"Connect to {requester}. Chat away!")
+                        self.append_msg("system", "-----------------------------------")
+                    elif status == "success":
+                        self.state = S_CHATTING
+                        self.append_msg("system", "Connection successful. Chat away!")
+                        self.append_msg("system", "-----------------------------------")
+                    elif status == "busy":
+                        self.append_msg("system", "User is busy. Please try again later.")
+                    elif status == "self":
+                        self.append_msg("system", "Cannot talk to yourself.")
+                    else:
+                        self.append_msg("system", "User is not online, try again later.")
+
+                elif action == "time":
+                    self.append_msg("system", "Time is: " + parsed.get("results", ""))
+                elif action == "list":
+                    self.append_msg("system", "Here are all the users in the system:")
+                    self.append_msg("system", parsed.get("results", ""))
+                elif action == "poem":
+                    poem = parsed.get("results", "")
+                    self.append_msg("system", poem if poem else "Sonnet not found")
+                elif action == "search":
+                    results = (parsed.get("results", "") or "").strip()
+                    self.append_msg("system", results if results else "No matches found.")
+                elif action == "snake_leaderboard":
+                    self.append_msg("system", parsed.get("results", ""))
+                elif action == "snake_submit_score":
+                    leaderboard = parsed.get("leaderboard", "")
+                    score = parsed.get("score", "")
+                    self.append_msg("system", f"Snake score submitted: {score}")
+                    if leaderboard:
+                        self.append_msg("system", leaderboard)
+                elif action == "ttt_invite":
+                    # inviter confirmation (optional UI)
+                    if parsed.get("status") == "sent":
+                        self.append_msg("system", f"TicTacToe invite sent. Game id: {parsed.get('game_id')}")
+                elif action == "ttt_challenge":
+                    payload = parsed
+                    def _handle():
+                        if self.ttt_window is None or not getattr(self.ttt_window.window, "winfo_exists", lambda: False)():
+                            self.ttt_window = TicTacToeMultiplayerWindow(
+                                self.root,
+                                title_prefix="Multiplayer",
+                                username=self.name,
+                                send_json=self._server_send_json,
+                            )
+                        self.ttt_window.on_challenge(payload)
+                    self.root.after(0, _handle)
+                elif action == "ttt_start":
+                    payload = parsed
+                    def _handle():
+                        if self.ttt_window is None or not getattr(self.ttt_window.window, "winfo_exists", lambda: False)():
+                            self.ttt_window = TicTacToeMultiplayerWindow(
+                                self.root,
+                                title_prefix="Multiplayer",
+                                username=self.name,
+                                send_json=self._server_send_json,
+                            )
+                        self.ttt_window.on_start(payload)
+                    self.root.after(0, _handle)
+                elif action == "ttt_state":
+                    payload = parsed
+                    def _handle():
+                        if self.ttt_window is not None:
+                            self.ttt_window.on_state(payload)
+                    self.root.after(0, _handle)
+                elif action == "ttt_abort":
+                    payload = parsed
+                    def _handle():
+                        if self.ttt_window is not None:
+                            self.ttt_window.on_abort(payload)
+                    self.root.after(0, _handle)
+                elif action == "ttt_declined":
+                    payload = parsed
+                    def _handle():
+                        if self.ttt_window is not None:
+                            self.ttt_window.on_abort({"reason": payload.get("reason", "declined")})
+                    self.root.after(0, _handle)
+                elif action == "error":
+                    reason = parsed.get("reason", "unknown server error")
+                    self.append_msg("error", f"[server error: {reason}]")
+                else:
+                    self.append_msg("error", f"[unknown server action: {action}]")
+
+            except OSError:
                 break
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
+                self.append_msg("error", f"[recv error: {e}]")
+            except Exception:
+                self.append_msg("error", "[recv error: unexpected internal error]")
+
         self.append_msg("error", "Disconnected from server.")
 
-
-    def append_sentiment(self, tag, label):
-        """Insert a small sentiment label on its own line, right-aligned."""
+    # ==========================================================================
+    # DISPLAY HELPERS
+    # ==========================================================================
+    def append_msg(self, tag, text):
+        """Thread-safe message insert — scheduled on GUI thread via after()."""
         def _insert():
-            self.chat_area.config(state="normal")
-            self.chat_area.insert("end", f"                                    {label}\n", tag)
-            self.chat_area.config(state="disabled")
+            self.chat_area.insert("end", text + "\n", tag)
             self.chat_area.see("end")
         self.root.after(0, _insert)
 
-    def toggle_sentiment(self):
-        """Turn sentiment analysis on or off."""
-        self.sentiment_on = not self.sentiment_on
-        status = "ON" if self.sentiment_on else "OFF"
-        self.append_msg("system", f"[Sentiment analysis {status}]")
+    def append_sentiment(self, tag, label):
+        def _insert():
+            self.chat_area.insert("end", " " * 36 + label + "\n", tag)
+            self.chat_area.see("end")
+        self.root.after(0, _insert)
 
     # ==========================================================================
-    # BOT CONTROLS
+    # BOT
     # ==========================================================================
     def toggle_bot_mode(self):
-        """Switch between bot chat mode and normal chat mode."""
         self.bot_mode = not self.bot_mode
         if self.bot_mode:
-            self.bot_bar.pack(fill="x", before=self.chat_area)
+            self.bot_bar.pack(fill="x", side="top", before=self.chat_area)
             self.bot.clear_history()
-            self.append_msg("bot", (
-                "[Bot mode ON] I'm your chat assistant. "
-                "Type 'exit bot' to return to normal chat.\n"
-                f"Current personality: {self.bot.get_personality().upper()}"
-            ))
+            self.append_msg("bot",
+                "[Bot mode ON] I'm your assistant. Type 'exit bot' to go back.\n"
+                f"Personality: {self.bot.get_personality().upper()}")
         else:
             self.bot_bar.pack_forget()
             self.append_msg("system", "[Bot mode OFF] Back to normal chat.")
 
     def change_personality(self):
-        """Called when user clicks a personality radio button."""
         p = self.personality_var.get()
         self.bot.set_personality(p)
-        self.append_msg("bot", f"[Bot] Personality switched to {p.upper()}. History cleared.")
+        self.append_msg("bot", f"[Bot] Personality -> {p.upper()}. History cleared.")
 
     def clear_bot_history(self):
-        """Clear bot conversation context."""
         self.bot.clear_history()
-        self.append_msg("bot", "[Bot] Conversation history cleared.")
+        self.append_msg("bot", "[Bot] History cleared.")
+
+    def _get_bot_reply(self, text):
+        reply = self.bot.chat(text, sender_name=self.name)
+        def _show():
+            try:
+                rng = self.chat_area.tag_nextrange("bot_thinking", "1.0")
+                if rng:
+                    self.chat_area.delete(rng[0], rng[1])
+                    self.chat_area.tag_delete("bot_thinking")
+            except Exception:
+                pass
+            self.append_msg("bot", f"[Bot ({self.bot.get_personality()})]: {reply}")
+        self.root.after(0, _show)
 
     def _broadcast_bot_reply(self, message, sender):
-        """
-        Group chat @bot handler: get reply from phi3 and send it
-        back through the socket so all group members see it.
-        """
         reply = self.bot.chat(message, sender_name=sender)
-        full_reply = f"@bot replies: {reply}"
-        # Send through the state machine as if we typed it
         if self.state == S_CHATTING:
-            self.root.after(0, lambda: (
-                self.append_msg("bot", f"[Bot]: {reply}"),
+            self.root.after(0, lambda: self.append_msg("bot", f"[Bot]: {reply}"))
+            try:
                 mysend(self.socket, json.dumps({
                     "action": "exchange",
-                    "from": f"[Bot]",
-                    "message": full_reply
+                    "from": "[Bot]",
+                    "message": f"@bot replies: {reply}"
                 }))
-            ))
+            except Exception:
+                pass
+
+    # ==========================================================================
+    # SENTIMENT
+    # ==========================================================================
+    def toggle_sentiment(self):
+        self.sentiment_on = not self.sentiment_on
+        status = "ON"       if self.sentiment_on else "OFF"
+        color  = ONLINE_DOT if self.sentiment_on else TEXT_DIM
+        self.sentiment_btn.config(text=f"SENTIMENT: {status}", fg=color)
+        self.append_msg("system", f"[Sentiment analysis {status}]")
+
+    # ==========================================================================
+    # CLEANUP
+    # ==========================================================================
+    def _cleanup_and_quit(self):
+        try:
+            if self.socket:
+                if self.state == S_CHATTING:
+                    try:
+                        mysend(self.socket, json.dumps({"action": "disconnect"}))
+                    except Exception:
+                        pass
+                self.state = S_OFFLINE
+                try:
+                    self.socket.shutdown(socket.SHUT_RDWR)
+                except Exception:
+                    pass
+                self.socket.close()
+        except Exception:
+            pass
+        self.root.destroy()
 
 
-# ==============================================================================
 # ==============================================================================
 def main():
     parser = argparse.ArgumentParser(description="ICS Chat GUI Client")
