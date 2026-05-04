@@ -34,7 +34,8 @@ class Server:
 
     def new_client(self, sock):
         # add to all sockets and to new clients
-        sock.setblocking(0)
+        # Keep new sockets in blocking mode so the initial login handshake
+        # (which uses myrecv and expects blocking sockets) works reliably.
         self.new_clients.append(sock)
         self.all_sockets.append(sock)
 
@@ -55,17 +56,74 @@ class Server:
         except Exception:
             pass
 
+    def _safe_send(self, sock, text):
+        """Send text to sock, but handle broken pipes / closed sockets gracefully."""
+        try:
+            mysend(sock, text)
+            return True
+        except (BrokenPipeError, ConnectionResetError):
+            # socket is dead — try to logout/cleanup
+            try:
+                self.logout(sock)
+            except Exception:
+                pass
+            return False
+        except Exception:
+            # best-effort: drop socket
+            try:
+                self._drop_socket(sock)
+            except Exception:
+                pass
+            return False
+
     def login(self, sock):
         # read the msg that should have login code plus username
         try:
             msg = json.loads(myrecv(sock))
             if len(msg) > 0:
 
+                action = msg.get("action")
+                # Allow signup/forgot during initial handshake (before login)
+                if action == "signup":
+                    name = msg.get("name", "").strip()
+                    password = msg.get("password", "")
+                    if not name or not password:
+                        mysend(sock, json.dumps({"action": "signup", "status": "missing-fields"}))
+                        return
+                    users = _load_users()
+                    if name in users:
+                        mysend(sock, json.dumps({"action": "signup", "status": "exists"}))
+                        return
+                    users[name] = {"pw_hash": _hash_password(password)}
+                    _save_users(users)
+                    mysend(sock, json.dumps({"action": "signup", "status": "ok"}))
+                    return
+                if action == "forgot":
+                    name = msg.get("name", "").strip()
+                    if not name:
+                        mysend(sock, json.dumps({"action": "forgot", "status": "missing-fields"}))
+                        return
+                    users = _load_users()
+                    if name not in users:
+                        mysend(sock, json.dumps({"action": "forgot", "status": "no-match"}))
+                        return
+                    import random, string
+                    temp = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
+                    users[name]["pw_hash"] = _hash_password(temp)
+                    _save_users(users)
+                    mysend(sock, json.dumps({"action": "forgot", "status": "ok", "temp": temp}))
+                    return
+
                 if msg["action"] == "login":
                     name = msg["name"]
                     if self.group.is_member(name) != True:
                         # move socket from new clients list to logged clients
                         self.new_clients.remove(sock)
+                        # ensure the socket is in blocking mode for myrecv
+                        try:
+                            sock.setblocking(1)
+                        except Exception:
+                            pass
                         # add into the name to sock mapping
                         self.logged_name2sock[name] = sock
                         self.logged_sock2name[sock] = name
@@ -152,13 +210,43 @@ class Server:
                         msg = json.dumps(
                             {"action": "connect", "status": "success"})
                         for g in the_guys[1:]:
-                            to_sock = self.logged_name2sock[g]
-                            mysend(to_sock, json.dumps(
-                                {"action": "connect", "status": "request", "from": from_name}))
+                            to_sock = self.logged_name2sock.get(g)
+                            if to_sock:
+                                self._safe_send(to_sock, json.dumps({"action": "connect", "status": "request", "from": from_name}))
                 else:
                     msg = json.dumps(
                         {"action": "connect", "status": "no-user"})
                 mysend(from_sock, msg)
+            elif action == "signup":
+                # signup expects name and password (email removed)
+                name = msg.get("name", "").strip()
+                password = msg.get("password", "")
+                if not name or not password:
+                    mysend(from_sock, json.dumps({"action": "signup", "status": "missing-fields"}))
+                    return
+                users = _load_users()
+                if name in users:
+                    mysend(from_sock, json.dumps({"action": "signup", "status": "exists"}))
+                    return
+                users[name] = {"pw_hash": _hash_password(password)}
+                _save_users(users)
+                mysend(from_sock, json.dumps({"action": "signup", "status": "ok"}))
+            elif action == "forgot":
+                # forgot expects name only; returns temp password
+                name = msg.get("name", "").strip()
+                if not name:
+                    mysend(from_sock, json.dumps({"action": "forgot", "status": "missing-fields"}))
+                    return
+                users = _load_users()
+                if name not in users:
+                    mysend(from_sock, json.dumps({"action": "forgot", "status": "no-match"}))
+                    return
+                # generate a temporary password (insecure but OK for demo)
+                import random, string
+                temp = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
+                users[name]["pw_hash"] = _hash_password(temp)
+                _save_users(users)
+                mysend(from_sock, json.dumps({"action": "forgot", "status": "ok", "temp": temp}))
 # ==============================================================================
 # handle messeage exchange: IMPLEMENT THIS
 # ==============================================================================
@@ -190,19 +278,11 @@ class Server:
                 the_guys = self.group.list_me(from_name)[1:]
                 for g in the_guys:
                     to_sock = self.logged_name2sock[g]
-
-                    # IMPLEMENTATION
-                    # ---- start your code ---- #
-                    mysend(
-                        to_sock,
-                        json.dumps(
-                            {
-                                "action": "exchange",
-                                "from": display_from,
-                                "message": message
-                            }
-                        )
-                    )
+                    self._safe_send(to_sock, json.dumps({
+                        "action": "exchange",
+                        "from": display_from,
+                        "message": message
+                    }))
 
                     # ---- end of your code --- #
 
@@ -232,6 +312,7 @@ class Server:
                 # ---- end of your code --- #
                 mysend(from_sock, json.dumps(
                     {"action": "list", "results": msg}))
+            # file action removed
 # ==============================================================================
 #             retrieve a sonnet : IMPLEMENT THIS
 # ==============================================================================
