@@ -1,5 +1,5 @@
 """
-sentiment.py - Sentiment analysis for ICS Chat System
+sentiment.py - Sentiment analysis for ICDS Chat System
 Uses TextBlob for offline, no-API sentiment detection.
 
 Returns an emoji tag + label for every outgoing message.
@@ -14,7 +14,7 @@ Author: Sanaa
 """
 
 try:
-    from textblob import TextBlob
+    from textblob import TextBlob  # type: ignore[reportMissingImports]
     TEXTBLOB_AVAILABLE = True
 except ImportError:
     TEXTBLOB_AVAILABLE = False
@@ -45,8 +45,11 @@ def get_sentiment(message: str):
             label — emoji + word for display, e.g. '😊 Positive'
             If TextBlob is unavailable, returns ('neutral', '')
     """
-    if not TEXTBLOB_AVAILABLE or not message.strip():
+    if not message.strip():
         return ("neutral", "")
+    if not TEXTBLOB_AVAILABLE:
+        # Still return a label so the GUI can render "neutral" sentiment.
+        return ("neutral", SENTIMENTS["neutral"])
 
     polarity = TextBlob(message).sentiment.polarity
 
