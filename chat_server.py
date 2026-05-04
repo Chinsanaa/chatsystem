@@ -319,6 +319,8 @@ class Server:
                 # ---- end of your code --- #
                 mysend(from_sock, json.dumps(
                     {"action": "search", "results": search_rslt}))
+            else:
+                self._send_error(from_sock, "unknown action")
 
             # ==============================================================================
             # Snake / Scoreboard (JSON protocol)

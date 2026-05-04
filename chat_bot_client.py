@@ -17,12 +17,55 @@ Author: Sanaa
 """
 
 import json
+import re
+import urllib.request
+
 try:
-    import ollama
+    import ollama  # type: ignore[import-not-found]
     OLLAMA_AVAILABLE = True
 except ImportError:
     OLLAMA_AVAILABLE = False
-
+ 
+MODEL_NAME   = "phi3"
+MAX_HISTORY  = 20
+ 
+ 
+def _check_ollama():
+    """
+    Returns (ok: bool, error_message: str).
+    Checks in order: package -> server running -> model downloaded.
+    Each failure gives an actionable message instead of a generic error.
+    """
+    # 1. Package
+    if not OLLAMA_AVAILABLE:
+        return False, (
+            "The ollama Python package is not installed.\n"
+            "Fix: open a terminal and run:  pip install ollama"
+        )
+    # 2. Server reachable
+    try:
+        urllib.request.urlopen("http://localhost:11434", timeout=2)
+    except Exception:
+        return False, (
+            "Ollama is installed but the server is not running.\n"
+            "Fix: open a NEW terminal and run:  ollama serve\n"
+            "Keep that terminal open, then try the bot again."
+        )
+    # 3. Model downloaded
+    try:
+        models = ollama.list()
+        names = [m["name"].split(":")[0] for m in models.get("models", [])]
+        if MODEL_NAME not in names:
+            return False, (
+                f"Ollama is running but the '{MODEL_NAME}' model is missing.\n"
+                f"Fix: open a terminal and run:  ollama pull {MODEL_NAME}\n"
+                "(downloads ~2 GB — leave it running until it finishes)"
+            )
+    except Exception as e:
+        return False, f"Could not list Ollama models: {e}"
+ 
+    return True, "ok"
+ 
 # ==============================================================================
 # Personality system prompts
 # ==============================================================================
@@ -40,7 +83,9 @@ PERSONALITIES = {
     "tutor": (
         "You are a helpful academic tutor. When asked questions, explain clearly "
         "and briefly (2-4 sentences). Encourage the student. "
-        "If the topic is unclear, ask one clarifying question."
+        "If the topic is unclear, ask one clarifying question. "
+        "Do NOT output the literal text \"instruction:\" or any tokens like \"[student]\" / \"[Student]\". "
+        "Never output bracketed role labels."
     ),
 }
 
@@ -81,6 +126,40 @@ class ChatBotClient:
         return list(PERSONALITIES.keys())
 
     # --------------------------------------------------------------------------
+    # Output sanitization (prevents leaking role artifacts like "instruction:" / "[student]")
+    # --------------------------------------------------------------------------
+    def _sanitize_reply(self, reply: str) -> str:
+        if not isinstance(reply, str):
+            return ""
+
+        # Normalize line endings
+        text = reply.replace("\r\n", "\n").replace("\r", "\n").strip()
+
+        # Remove standalone "instruction:" lines
+        lines = []
+        for line in text.split("\n"):
+            stripped = line.strip()
+            if re.match(r"(?i)^instruction\s*:\s*$", stripped):
+                continue
+            if re.match(r"(?i)^instruction\s*:\s+.*$", stripped):
+                # If the model inlines explanation after "instruction:" prefix, drop that line.
+                continue
+
+            # Remove bracketed role artifacts that look like "[student] ..."
+            if re.match(r"^\[\s*student\s*\]($|\s+)", stripped, flags=re.IGNORECASE):
+                continue
+            if re.match(r"^\[\s*student\s*\]($|\s+)", stripped, flags=0):
+                continue
+
+            # Also remove any line that starts with "[student]" or "[Student]"
+            if re.match(r"^\[\s*student\s*\]", stripped, flags=re.IGNORECASE):
+                continue
+
+            lines.append(line)
+
+        return "\n".join(lines).strip()
+
+    # --------------------------------------------------------------------------
     # Core chat method
     # --------------------------------------------------------------------------
     def chat(self, user_message, sender_name="user"):
@@ -95,7 +174,7 @@ class ChatBotClient:
             str: the bot's reply, or an error string
         """
         if not OLLAMA_AVAILABLE:
-            return "[Bot] Ollama is not installed. Run: pip install ollama"
+            return _check_ollama()[1]  # return the error message from the check
 
         if not user_message.strip():
             return ""
@@ -119,6 +198,8 @@ class ChatBotClient:
             reply = response["message"]["content"].strip()
         except Exception as e:
             reply = f"[Bot error] {str(e)}"
+
+        reply = self._sanitize_reply(reply)
 
         # Save bot reply to history for context
         self.history.append({"role": "assistant", "content": reply})
