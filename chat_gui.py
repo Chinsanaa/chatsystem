@@ -16,6 +16,10 @@ import nlp_tools
 
 from snake import SnakeGame
 from tictactoe import TicTacToeMultiplayerWindow
+
+# Local AI image generation (client-side)
+from ai_image_gen import generate_image
+
 # ==============================================================================
 # Friendly command reference (replaces raw terminal menu string)
 # ==============================================================================
@@ -29,6 +33,7 @@ FRIENDLY_MENU = """
   /p <number>         Get a Shakespeare sonnet (e.g.  p 18)
   /keywords            Get chat keywords
   /summary             Get chat summary
+  /aipic:<prompt>     Generate AI image
   /q                  Quit the app
 --------------------------
 """
@@ -705,7 +710,14 @@ class GUIClient:
             return None
         if cmd.startswith("/"):
             cmd = cmd[1:].strip()
+        # Local command: /aipic: <prompt>
+        # Handled entirely client-side (no server action).
+        if cmd.lower().startswith("aipic:") or cmd.lower().startswith("/aipic:"):
+            # Normalize both cases into one format: "aipic:" prefix.
+            return {"action": "aipic_local"}
+
         low = cmd.lower()
+
 
         if low == "time":
             return {"action": "time"}
@@ -751,6 +763,40 @@ class GUIClient:
         if text.strip().lower() in ("q", "/q", "quit", "/quit"):
             self._cleanup_and_quit()
             return
+
+        # Local command: /aipic: <prompt>
+        # Must happen before state-specific server logic.
+        if text.lower().startswith("/aipic:") or text.lower().startswith("aipic:"):
+            # Extract prompt after the first ':'
+            try:
+                prompt = text.split(":", 1)[1].strip()
+            except Exception:
+                prompt = ""
+
+            if not prompt:
+                self.append_msg("error", "Usage: /aipic: <prompt>")
+                return
+
+            self.append_msg("system", f"Generating image for: {prompt}")
+
+            def _worker():
+                try:
+                    out_path = generate_image(prompt)
+                    # Open via OS default viewer (async on GUI thread)
+                    def _open():
+                        try:
+                            os.startfile(out_path)
+                        except Exception:
+                            self.append_msg("error", f"Image saved to: {out_path}")
+                        else:
+                            self.append_msg("system", f"Image generated: {out_path}")
+                    self.root.after(0, _open)
+                except Exception as e:
+                    self.root.after(0, lambda: self.append_msg("error", f"/aipic error: {e}"))
+
+            threading.Thread(target=_worker, daemon=True).start()
+            return
+
 
         # Bot mode: messages go to phi3, not server
         if self.bot_mode:
