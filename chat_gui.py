@@ -1092,7 +1092,8 @@ class GUIClient:
                     reason = parsed.get("reason", "unknown server error")
                     self.append_msg("error", f"[server error: {reason}]")
                 else:
-                    self.append_msg("system", f"[server action: {action}]")  # Ignore unknown for clean chat
+                    # Show unknown actions to help debugging (fixes "server unknown action" confusion)
+                    self.append_msg("error", f"[server action: {action} payload={parsed}]")
 
             except OSError:
                 break

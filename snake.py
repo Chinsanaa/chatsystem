@@ -16,6 +16,9 @@ class SnakeGame:
         self.username = username
         self.send_json = send_json
         self.client_socket = client_socket
+        # some older versions of snake.py are created without args in __main__
+        # so guard against missing submit callback
+        self._can_submit = callable(self.send_json)
 
         self.canvas = tk.Canvas(root, width=WIDTH, height=HEIGHT, bg="black")
         self.canvas.pack()
@@ -116,15 +119,19 @@ class SnakeGame:
     def end_game(self):
         self.game_over = True
 
-        # Local update for immediate feedback
+        # Best-effort local update for immediate feedback
         update_score(self.username, self.score)
         print(get_leaderboard())
 
-        # Send score to server via callback
-        try:
-            self.send_json({"action": "snake_submit_score", "score": self.score})
-        except Exception as e:
-            print(f"Failed to send score: {e}")
+        # Submit score to server so every GUI sees the same leaderboard
+        if getattr(self, "_can_submit", False):
+            try:
+                self.send_json({
+                    "action": "snake_submit_score",
+                    "score": self.score,
+                })
+            except Exception as e:
+                print(f"Failed to send score: {e}")
 
 if __name__ == "__main__":
     root = tk.Tk()

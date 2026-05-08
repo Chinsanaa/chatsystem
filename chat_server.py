@@ -554,9 +554,263 @@ class Server:
                 # ---- end of your code --- #
                 mysend(from_sock, json.dumps(
                     {"action": "search", "results": search_rslt}))
+            elif action == "snake_leaderboard":
+                try:
+                    import scoreboard
+                    lb = scoreboard.get_leaderboard()
+                    mysend(from_sock, json.dumps({"action": "snake_leaderboard", "results": lb}))
+                except Exception as e:
+                    self._send_error(from_sock, f"Leaderboard error: {e}")
+
+            elif action == "snake_submit_score":
+                # Server-authoritative leaderboard update
+                try:
+                    import scoreboard
+                    from_name = self.logged_sock2name.get(from_sock)
+                    score = msg.get("score")
+                    if not from_name:
+                        self._send_error(from_sock, "missing user")
+                    else:
+                        scoreboard.update_score(from_name, score)
+                        lb = scoreboard.get_leaderboard()
+                        mysend(from_sock, json.dumps({"action": "snake_leaderboard", "results": lb}))
+                except Exception as e:
+                    self._send_error(from_sock, f"Score submit error: {e}")
+
+            # -------------------- tic tac toe multiplayer --------------------
+            # Protocol is intentionally simple and server-authoritative.
+            elif action == "ttt_invite":
+                # Create a pending game id and notify target that they have a challenge.
+                from_name = self.logged_sock2name.get(from_sock)
+                to_name = msg.get("target", "").strip()
+                try:
+                    if not from_name:
+                        raise ValueError("missing from_name")
+                    if not to_name:
+                        raise ValueError("missing target")
+                    if not self.group.is_member(to_name):
+                        mysend(from_sock, json.dumps({"action": "ttt_invite", "status": "no-user"}))
+                        return
+
+                    # Accept a new game id from client if provided, else make one.
+                    game_id = msg.get("game_id") or f"ttt_{int(time.time()*1000)}_{from_name}"
+
+                    # Store pending invite in-memory under the server instance.
+                    # Structure: pending_ttt[game_id] = {"X": p1, "O": p2, "p1":..., "p2":...}
+                    if not hasattr(self, "pending_ttt"):
+                        self.pending_ttt = {}
+                    if not hasattr(self, "active_ttt"):
+                        self.active_ttt = {}
+
+                    # Assign symbols deterministically by inviter as X.
+                    self.pending_ttt[game_id] = {
+                        "X": from_name,
+                        "O": to_name,
+                        "from": from_name,
+                        "to": to_name,
+                    }
+
+                    # Notify target with challenge. GUI will enable accept/decline.
+                    to_sock = self.logged_name2sock.get(to_name)
+                    if to_sock:
+                        self._safe_send(to_sock, json.dumps({
+                            "action": "ttt_challenge",
+                            "game_id": game_id,
+                            "from": from_name,
+                            "your_symbol": "O" if from_name == self.pending_ttt[game_id]["X"] else "X",
+                        }))
+
+                    # Inform inviter that invite was sent.
+                    mysend(from_sock, json.dumps({"action": "ttt_invite", "status": "sent", "game_id": game_id}))
+                except Exception as e:
+                    self._send_error(from_sock, f"ttt_invite error: {e}")
+
+            elif action == "ttt_accept":
+                from_name = self.logged_sock2name.get(from_sock)
+                game_id = msg.get("game_id")
+                try:
+                    if not from_name or not game_id:
+                        raise ValueError("missing fields")
+                    if not hasattr(self, "pending_ttt") or game_id not in self.pending_ttt:
+                        raise ValueError("no pending game")
+
+                    pending = self.pending_ttt[game_id]
+                    x_player = pending["X"]
+                    o_player = pending["O"]
+
+                    # Validate accepter is one of the players.
+                    if from_name not in (x_player, o_player):
+                        raise ValueError("not a player")
+
+                    # Start game immediately.
+                    board = [""] * 9
+                    turn = "X"
+                    status = "playing"
+
+                    if not hasattr(self, "active_ttt"):
+                        self.active_ttt = {}
+                    self.active_ttt[game_id] = {
+                        "board": board,
+                        "turn": turn,
+                        "winner": None,
+                        "draw": False,
+                        "status": status,
+                        "players": {"X": x_player, "O": o_player},
+                    }
+                    # Remove pending
+                    del self.pending_ttt[game_id]
+
+                    x_sock = self.logged_name2sock.get(x_player)
+                    o_sock = self.logged_name2sock.get(o_player)
+
+                    if x_sock:
+                        self._safe_send(x_sock, json.dumps({
+                            "action": "ttt_start",
+                            "game_id": game_id,
+                            "board": board,
+                            "players": {"X": x_player, "O": o_player},
+                            "turn": turn,
+                            "your_symbol": "X",
+                            "status": "playing",
+                            "opponent": o_player,
+                        }))
+                    if o_sock:
+                        self._safe_send(o_sock, json.dumps({
+                            "action": "ttt_start",
+                            "game_id": game_id,
+                            "board": board,
+                            "players": {"X": x_player, "O": o_player},
+                            "turn": turn,
+                            "your_symbol": "O",
+                            "status": "playing",
+                            "opponent": x_player,
+                        }))
+                except Exception as e:
+                    self._send_error(from_sock, f"ttt_accept error: {e}")
+
+            elif action == "ttt_move":
+                from_name = self.logged_sock2name.get(from_sock)
+                game_id = msg.get("game_id")
+                index = msg.get("index")
+                try:
+                    if not game_id or not isinstance(index, int):
+                        raise ValueError("missing fields")
+                    if not hasattr(self, "active_ttt") or game_id not in self.active_ttt:
+                        raise ValueError("no active game")
+
+                    g = self.active_ttt[game_id]
+                    board = g["board"]
+                    turn = g["turn"]
+                    players = g["players"]
+
+                    your_symbol = None
+                    for sym, uname in players.items():
+                        if uname == from_name:
+                            your_symbol = sym
+                            break
+                    if your_symbol is None:
+                        raise ValueError("not a player")
+                    if your_symbol != turn:
+                        raise ValueError("not your turn")
+                    if index < 0 or index > 8:
+                        raise ValueError("bad index")
+                    if board[index] != "":
+                        raise ValueError("cell taken")
+
+                    board[index] = turn
+
+                    # Determine winner/draw.
+                    from tictactoe import check_winner
+                    winner = check_winner(board)
+                    draw = False
+                    status = "playing"
+                    if winner:
+                        status = "finished"
+                    elif "" not in board:
+                        draw = True
+                        status = "finished"
+                    else:
+                        # switch turn
+                        turn = "O" if turn == "X" else "X"
+
+                    # Update game state
+                    g["board"] = board
+                    g["turn"] = turn
+                    g["winner"] = winner
+                    g["draw"] = draw
+                    g["status"] = status
+
+                    # Send state to both players
+                    x_player = players["X"]
+                    o_player = players["O"]
+                    x_sock = self.logged_name2sock.get(x_player)
+                    o_sock = self.logged_name2sock.get(o_player)
+
+                    payload_common = {
+                        "action": "ttt_state",
+                        "game_id": game_id,
+                        "board": board,
+                        "turn": turn,
+                        "winner": winner,
+                        "draw": draw,
+                        "status": status,
+                    }
+                    if x_sock:
+                        self._safe_send(x_sock, json.dumps({**payload_common, "your_symbol": "X"}))
+                    if o_sock:
+                        self._safe_send(o_sock, json.dumps({**payload_common, "your_symbol": "O"}))
+
+                    # If finished, cleanup
+                    if status == "finished":
+                        # allow UI to render final state; remove after
+                        if hasattr(self, "active_ttt"):
+                            del self.active_ttt[game_id]
+                except Exception as e:
+                    self._send_error(from_sock, f"ttt_move error: {e}")
+
+            elif action == "ttt_leave":
+                from_name = self.logged_sock2name.get(from_sock)
+                game_id = msg.get("game_id")
+                try:
+                    if not game_id or not hasattr(self, "active_ttt") or game_id not in self.active_ttt:
+                        return
+                    g = self.active_ttt[game_id]
+                    players = g["players"]
+                    x_player = players["X"]
+                    o_player = players["O"]
+                    x_sock = self.logged_name2sock.get(x_player)
+                    o_sock = self.logged_name2sock.get(o_player)
+
+                    # Abort game
+                    reason = "player left"
+                    if x_sock:
+                        self._safe_send(x_sock, json.dumps({"action": "ttt_abort", "game_id": game_id, "reason": reason}))
+                    if o_sock:
+                        self._safe_send(o_sock, json.dumps({"action": "ttt_abort", "game_id": game_id, "reason": reason}))
+
+                    del self.active_ttt[game_id]
+                except Exception as e:
+                    self._send_error(from_sock, f"ttt_leave error: {e}")
+
+            elif action == "ttt_decline":
+                # Optional: just ignore/abort the pending invite if it exists.
+                game_id = msg.get("game_id")
+                try:
+                    if hasattr(self, "pending_ttt") and game_id in self.pending_ttt:
+                        pending = self.pending_ttt.get(game_id, {})
+                        inviter = pending.get("from")
+                        if inviter:
+                            inv_sock = self.logged_name2sock.get(inviter)
+                            if inv_sock:
+                                self._safe_send(inv_sock, json.dumps({"action": "ttt_abort", "game_id": game_id, "reason": "declined"}))
+                        del self.pending_ttt[game_id]
+                except Exception:
+                    pass
+
             else:
                 self._send_error(from_sock, "unknown action")
                 logger.warning(f"Unknown action from socket {getattr(from_sock, 'fileno', lambda: 'n/a')()}: {action}")
+
 
 # ==============================================================================
 #                 the "from" guy really, really has had enough
